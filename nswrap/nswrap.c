@@ -38,6 +38,12 @@
 #define nswrap_log_errno(verb, component, fmt, ...) \
     nswrap_log(verb, component, fmt ": %s", ##__VA_ARGS__, strerror(errno))
 
+/** Whether to pass-through the title if stdout is a TTY. **/
+#define NSWRAP_IOPROC_TTY_TITLE true
+
+/** Whether to pass-through colors if stdout is a TTY. **/
+#define NSWRAP_IOPROC_TTY_COLOR true
+
 /** The chunk size for console i/o (also the maximum length of a parsed title). */
 #define NSWRAP_IOPROC_OUTPUT_CHUNK_SIZE 256
 
@@ -129,7 +135,7 @@ static struct {
         int pty_slave_fd; // not CLOEXEC
         int pty_slave_n;
         char pty_slave_fn[20];
-        bool enable_color;
+        bool isatty;
         regex_t title_re;
 
         int state;
@@ -145,58 +151,13 @@ static struct {
         char *argv[256];
         char *envp[256];
         int errno_pipe[2];
-        pid_t pid;
-        bool exited;
-        int wstatus;
+        pid_t proc_pid;
+        bool proc_exited;
+        int proc_wstatus;
         int shutdown_count;
+        struct wl_signal exited;
     } wine;
 } state;
-
-static int handle_shutdown(int signal_number, void *data) {
-    if (state.wine.pid) {
-        switch (++state.wine.shutdown_count) {
-        case 1:
-            nswrap_log(WLR_INFO, NULL, "Received first shutdown signal, requesting game server exit");
-            kill(state.wine.pid, SIGTERM);
-            // TODO: send proper quit to server
-            break;
-        case 2:
-            nswrap_log(WLR_INFO, NULL, "Received second shutdown signal, terminating wine");
-            kill(state.wine.pid, SIGTERM);
-            break;
-        case 3:
-            nswrap_log(WLR_INFO, NULL, "Received third shutdown signal, killing wine");
-            kill(state.wine.pid, SIGKILL);
-            break;
-        default:
-            nswrap_log(WLR_INFO, NULL, "Received multiple shutdown signals, forcefully terminating");
-            wl_display_terminate(state.wl.display);
-            break;
-        }
-    } else {
-        wl_display_terminate(state.wl.display);
-    }
-    return 0;
-}
-
-static int handle_sigchld(int signal_number, void *data) {
-    pid_t pid;
-    int wstatus;
-    while ((pid = waitpid(-1, &wstatus, WNOHANG)) > 0) {
-        if (pid == state.wine.pid) {
-            state.wine.pid = 0;
-            state.wine.exited = true;
-            state.wine.wstatus = wstatus;
-            if (WIFSIGNALED(state.wine.wstatus)) {
-                nswrap_log(WLR_INFO, "wine", "Wine killed by signal %d", WTERMSIG(state.wine.wstatus));
-            } else {
-                nswrap_log(WLR_INFO, "wine", "Wine exited with status %d", WEXITSTATUS(state.wine.wstatus));
-            }
-            wl_display_terminate(state.wl.display);
-        }
-    }
-    return 0;
-}
 
 static int handle_ioproc_master(int fd, uint32_t mask, void *data) {
     ssize_t tmp;
@@ -274,6 +235,12 @@ slow:
                 state.ioproc.b_out[state.ioproc.n_out++] = c;
                 break;
             case ';':
+                if (NSWRAP_IOPROC_TTY_TITLE && state.ioproc.isatty) {
+                    state.ioproc.b_out[state.ioproc.n_out++] = 0x1B;
+                    state.ioproc.b_out[state.ioproc.n_out++] = ']';
+                    state.ioproc.b_out[state.ioproc.n_out++] = '0';
+                    state.ioproc.b_out[state.ioproc.n_out++] = c;
+                }
                 state.ioproc.state = 4;
                 state.ioproc.n_tit = 0;
                 break;
@@ -282,6 +249,9 @@ slow:
         case 4: // in \x1B]0;
             switch (c) {
             default:
+                if (NSWRAP_IOPROC_TTY_TITLE && state.ioproc.isatty) {
+                    state.ioproc.b_out[state.ioproc.n_out++] = c;
+                }
                 // next title char
                 if (state.ioproc.n_tit < NSWRAP_IOPROC_OUTPUT_CHUNK_SIZE) {
                     state.ioproc.b_tit[state.ioproc.n_tit++] = c;
@@ -289,6 +259,9 @@ slow:
                 }
                 __attribute__((fallthrough));
             case 0x07:
+                if (NSWRAP_IOPROC_TTY_TITLE && state.ioproc.isatty) {
+                    state.ioproc.b_out[state.ioproc.n_out++] = c;
+                }
                 // end of title || overflow
                 if (state.ioproc.n_tit == NSWRAP_IOPROC_OUTPUT_CHUNK_SIZE) {
                     state.ioproc.state = 5;
@@ -306,18 +279,16 @@ slow:
                             regerror(rc, &state.ioproc.title_re, err, sizeof(err));
                             nswrap_log(WLR_ERROR, "ioproc", "Failed to match title regex: %s", err);
                         }
-                        errno = EINVAL;
-                        return -1;
+                    } else {
+                        int i = 0;
+                        #define m_str(_v) \
+                            i++; snprintf(state.ioproc.status._v, sizeof(state.ioproc.status._v), "%.*s", (int)(m[i].rm_eo - m[i].rm_so), state.ioproc.status.title + m[i].rm_so);
+                        #define m_int(_v) \
+                            i++; state.ioproc.status._v = 0; for (regoff_t j = m[i].rm_so; j < m[i].rm_eo; j++) { state.ioproc.status._v = 10 * state.ioproc.status._v + (state.ioproc.status.title[j] - '0'); };
+                        NSWRAP_STATUS_RE_GROUPS(m_int, m_str);
+                        #undef m_str
+                        #undef m_int
                     }
-                    int i = 0;
-                    #define m_str(_v) \
-                        i++; snprintf(state.ioproc.status._v, sizeof(state.ioproc.status._v), "%.*s", (int)(m[i].rm_eo - m[i].rm_so), state.ioproc.status.title + m[i].rm_so);
-                    #define m_int(_v) \
-                        i++; state.ioproc.status._v = 0; for (regoff_t j = m[i].rm_so; j < m[i].rm_eo; j++) { state.ioproc.status._v = 10 * state.ioproc.status._v + (state.ioproc.status.title[j] - '0'); };
-                    NSWRAP_STATUS_RE_GROUPS(m_int, m_str);
-                    #undef m_str
-                    #undef m_int
-                    return 0;
                 }
                 wl_signal_emit_mutable(&state.ioproc.status_updated, NULL);
                 state.ioproc.n_tit = 0;
@@ -331,13 +302,22 @@ slow:
         case 5: // in title
             switch (c) {
             default:
+                if (NSWRAP_IOPROC_TTY_TITLE && state.ioproc.isatty) {
+                    state.ioproc.b_out[state.ioproc.n_out++] = c;
+                }
                 // overflowing title character
                 break;
             case 0x07:
+                if (NSWRAP_IOPROC_TTY_TITLE && state.ioproc.isatty) {
+                    state.ioproc.b_out[state.ioproc.n_out++] = c;
+                }
                 // end of the overflowing title
                 state.ioproc.state = 0;
                 break;
             case 0x1B:
+                if (NSWRAP_IOPROC_TTY_TITLE && state.ioproc.isatty) {
+                    state.ioproc.b_out[state.ioproc.n_out++] = 0x07; // end the title
+                }
                 // start of a new escape sequence (this shouldn't happen)
                 state.ioproc.state = 1;
                 break;
@@ -363,14 +343,12 @@ slow:
             case '3': // text attr: foreground
             case '4': // text attr: background
             case '9': // text attr: foreground light
-                if (state.ioproc.enable_color) {
-                    state.ioproc.state = 0;
+                if (NSWRAP_IOPROC_TTY_COLOR && state.ioproc.isatty) {
                     state.ioproc.b_out[state.ioproc.n_out++] = 0x1B;
                     state.ioproc.b_out[state.ioproc.n_out++] = '[';
                     state.ioproc.b_out[state.ioproc.n_out++] = c;
-                } else {
-                    state.ioproc.state = 33;
                 }
+                state.ioproc.state = 33;
                 break;
             case 'K':
                 // ignore the CR equivalent
@@ -445,6 +423,9 @@ slow:
             }
             break;
         case 33: // inside text attributes (i.e., ignore anything until an invalid attr char or an 'm' to terminate it)
+            if (NSWRAP_IOPROC_TTY_COLOR && state.ioproc.isatty) {
+                state.ioproc.b_out[state.ioproc.n_out++] = c;
+            }
             if (c == ';')
                 break; // separator
             if (c >= '0' && c <= '9')
@@ -455,8 +436,10 @@ slow:
             break;
         }
     }
-    fwrite(state.ioproc.b_out, 1, state.ioproc.n_out, stdout);
-    fflush(stdout);
+    if (state.ioproc.n_out) {
+        fwrite(state.ioproc.b_out, 1, state.ioproc.n_out, stdout);
+        fflush(stdout);
+    }
     return 0;
 }
 
@@ -469,6 +452,55 @@ static int handle_wine_errno(int fd, uint32_t mask, void *data) {
         nswrap_log_errno(WLR_ERROR, "wine", "Failed to start process");
     }
     wl_display_terminate(state.wl.display);
+    return 0;
+}
+
+static void handle_wine_exited(struct wl_listener *listener, void *data) {
+    if (WIFSIGNALED(state.wine.proc_wstatus)) {
+        nswrap_log(WLR_INFO, "wine", "Wine killed by signal %d", WTERMSIG(state.wine.proc_wstatus));
+    } else {
+        nswrap_log(WLR_INFO, "wine", "Wine exited with status %d", WEXITSTATUS(state.wine.proc_wstatus));
+    }
+}
+
+static int handle_sigchld(int signal_number, void *data) {
+    pid_t pid;
+    int wstatus;
+    while ((pid = waitpid(-1, &wstatus, WNOHANG)) > 0) {
+        if (pid == state.wine.proc_pid) {
+            state.wine.proc_exited = true;
+            state.wine.proc_wstatus = wstatus;
+            wl_signal_emit_mutable(&state.wine.exited, NULL);
+            wl_display_terminate(state.wl.display);
+        }
+    }
+    return 0;
+}
+
+static int handle_shutdown(int signal_number, void *data) {
+    if (state.wine.proc_pid) {
+        switch (++state.wine.shutdown_count) {
+        case 1:
+            nswrap_log(WLR_INFO, NULL, "Received first shutdown signal, requesting game server exit");
+            kill(state.wine.proc_pid, SIGTERM);
+            // TODO: send proper quit to server
+            break;
+        case 2:
+            nswrap_log(WLR_INFO, NULL, "Received second shutdown signal, terminating wine");
+            kill(state.wine.proc_pid, SIGTERM);
+            break;
+        case 3:
+            nswrap_log(WLR_INFO, NULL, "Received third shutdown signal, killing wine");
+            kill(state.wine.proc_pid, SIGKILL);
+            break;
+        default:
+            nswrap_log(WLR_INFO, NULL, "Received multiple shutdown signals, forcefully terminating");
+            wl_display_terminate(state.wl.display);
+            break;
+        }
+    } else {
+        wl_display_terminate(state.wl.display);
+    }
     return 0;
 }
 
@@ -588,7 +620,7 @@ int main(int argc, char **argv) {
             nswrap_log_errno(WLR_ERROR, "ioproc", "Failed to set pty slave winsize");
             goto cleanup;
         }
-        state.ioproc.enable_color = !!isatty(STDIN_FILENO);
+        state.ioproc.isatty = !!isatty(STDIN_FILENO);
 
         int rc;
         #define x(_n, _r, _g) _r
@@ -637,14 +669,21 @@ int main(int argc, char **argv) {
         if (!(state.wine.envp[i++] = getenve("WINEPREFIX"))) i--;
         if (!(state.wine.envp[i++] = getenve("WINESERVER"))) i--;
 
+        // errno pipe
         if (pipe2(state.wine.errno_pipe, O_DIRECT | O_NONBLOCK)) {
             nswrap_log_errno(WLR_ERROR, "wine", "Failed to create errno pipe");
             return 1;
         }
         wl_event_loop_add_fd(loop, state.wine.errno_pipe[0], WL_EVENT_READABLE, handle_wine_errno, NULL);
 
+        // exit handler
+        struct wl_listener *exited_listener = alloca(sizeof(struct wl_listener));
+        exited_listener->notify = handle_wine_exited;
+        wl_signal_init(&state.wine.exited);
+        wl_signal_add(&state.wine.exited, exited_listener);
+
         // start process
-        if (!(state.wine.pid = fork())) {
+        if (!(state.wine.proc_pid = fork())) {
             setsid();
             ioctl(state.ioproc.pty_slave_fd, TIOCSCTTY, 0);
             dup2(state.ioproc.pty_slave_fd, 0);
@@ -670,11 +709,11 @@ cleanup:
     nswrap_log(WLR_INFO, NULL, "Cleaning up");
 
     // wine
-    if (state.wine.pid && !state.wine.exited) {
+    if (state.wine.proc_pid && !state.wine.proc_exited) {
         nswrap_log(WLR_INFO, "wine", "Wine hasn't exited; killing");
-        if (kill(state.wine.pid, SIGKILL)) {
+        if (kill(state.wine.proc_pid, SIGKILL)) {
             if (errno != ESRCH) {
-                nswrap_log_errno(WLR_ERROR, "wine", "Failed to kill pid %d", (int)(state.wine.pid));
+                nswrap_log_errno(WLR_ERROR, "wine", "Failed to kill pid %d", (int)(state.wine.proc_pid));
             }
         }
     }
@@ -722,9 +761,10 @@ cleanup:
                 }
                 continue; // children exist, but haven't changed state; try again
             default:
-                if (pid == state.wine.pid) {
-                    state.wine.exited = true;
-                    state.wine.wstatus = wstatus;
+                if (pid == state.wine.proc_pid) {
+                    state.wine.proc_exited = true;
+                    state.wine.proc_wstatus = wstatus;
+                    wl_signal_emit_mutable(&state.wine.exited, NULL);
                 }
                 continue; // child reaped; try another one immediately
             }
