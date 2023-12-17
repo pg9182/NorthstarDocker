@@ -668,7 +668,7 @@ int main(int argc, char **argv) {
             }
         }
         if (!has_dedicated) {
-            nswrap_log_errno(WLR_ERROR, NULL, "Must contain -dedicated argument (see `%s -h`)\n", argv[0] ?: "nswrap");
+            nswrap_log(WLR_ERROR, NULL, "Must contain -dedicated argument (see `%s -h`)\n", argv[0] ?: "nswrap");
             exit(1);
         }
     }
@@ -790,13 +790,12 @@ int main(int argc, char **argv) {
                 nswrap_log_errno(WLR_ERROR, "ioproc", "Failed to get pty slave termios");
                 goto cleanup;
             }
-            pty_termios.c_iflag = BRKINT | IGNPAR | ISTRIP | IGNCR | IUTF8;
-            pty_termios.c_oflag = OPOST | ONOCR;
-            pty_termios.c_cflag = CREAD;
-            pty_termios.c_lflag = ISIG | ICANON;
-            // return from read() at least every 0.1s, whether or not data is available
-            pty_termios.c_cc[VMIN] = 0;
-            pty_termios.c_cc[VTIME] = 1;
+            pty_termios.c_iflag = IGNBRK | IGNPAR | IGNCR | IUTF8;
+            pty_termios.c_oflag = 0;
+            pty_termios.c_cflag = CREAD | CS8;
+            pty_termios.c_lflag = 0;
+            pty_termios.c_cc[VMIN] = 1;
+            pty_termios.c_cc[VTIME] = 0;
             if (tcsetattr(state.ioproc.pty_slave_fd, TCSANOW, &pty_termios)) {
                 nswrap_log_errno(WLR_ERROR, "ioproc", "Failed to set pty slave termios");
                 goto cleanup;
@@ -866,7 +865,13 @@ int main(int argc, char **argv) {
         state.wine.argv[i++] = strdupa("wine64");
         state.wine.argv[i++] = strdupa("NorthstarLauncher.exe");
         state.wine.argv[i++] = strdupa("-dedicated");
-        for (int j = optind; j < argc; j++) {
+        for (int j = 1, d = 0; j < argc; j++) {
+            if (!d) {
+                if (!strcmp(argv[j], "-dedicated")) {
+                    d = 1;
+                }
+                continue;
+            }
             if (i >= sizeof(state.wine.argv)/(sizeof(*state.wine.argv))) {
                 nswrap_log(WLR_ERROR, "wine", "Too many arguments");
                 goto cleanup;
