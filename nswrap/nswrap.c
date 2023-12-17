@@ -485,6 +485,26 @@ slow:
     return 0;
 }
 
+static int handle_ioproc_stdin(int fd, uint32_t mask, void *data) {
+    char buf[512];
+    ssize_t n;
+    while ((n = read(STDIN_FILENO, buf, sizeof(buf))) == -1) {
+        if (errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) {
+            nswrap_log_errno(WLR_ERROR, "ioproc", "Failed to read stdin");
+        }
+        return 0;
+    }
+    for (ssize_t i = 0; i < n; i++) {
+        if (buf[i] == '\n') {
+            buf[i] = '\r';
+        }
+    }
+    if (write(state.ioproc.pty_master_fd, buf, n) == -1) { // note: pty is buffered
+        nswrap_log_errno(WLR_ERROR, "ioproc", "Failed to write to pty master");
+    }
+    return 0;
+}
+
 static int handle_watchdog_timer(void *data) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
@@ -578,8 +598,7 @@ static int handle_shutdown(int signal_number, void *data) {
         switch (++state.wine.shutdown_count) {
         case 1:
             nswrap_log(WLR_INFO, NULL, "Received first shutdown signal, requesting game server exit");
-            kill(state.wine.proc_pid, SIGTERM);
-            // TODO: send proper quit to server
+            write(state.ioproc.pty_master_fd, "\rquit\r", strlen("\rquit\r"));
             break;
         case 2:
             nswrap_log(WLR_INFO, NULL, "Received second shutdown signal, terminating wine");
@@ -790,10 +809,11 @@ int main(int argc, char **argv) {
                 nswrap_log_errno(WLR_ERROR, "ioproc", "Failed to get pty slave termios");
                 goto cleanup;
             }
-            pty_termios.c_iflag = IGNBRK | IGNPAR | IGNCR | IUTF8;
-            pty_termios.c_oflag = 0;
-            pty_termios.c_cflag = CREAD | CS8;
-            pty_termios.c_lflag = 0;
+            pty_termios.c_lflag &= ~(ECHO | ECHONL | ICANON | IEXTEN | ISIG);
+            pty_termios.c_lflag |= IGNBRK | IGNPAR | IGNCR | IUTF8;
+            pty_termios.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+            pty_termios.c_cflag &= ~(CSIZE | PARENB);
+            pty_termios.c_cflag |= CREAD | CS8;
             pty_termios.c_cc[VMIN] = 1;
             pty_termios.c_cc[VTIME] = 0;
             if (tcsetattr(state.ioproc.pty_slave_fd, TCSANOW, &pty_termios)) {
@@ -822,6 +842,7 @@ int main(int argc, char **argv) {
 
         wl_signal_init(&state.ioproc.status_updated);
         wl_event_loop_add_fd(loop, state.ioproc.pty_master_fd, WL_EVENT_READABLE, handle_ioproc_master, NULL);
+        wl_event_loop_add_fd(loop, STDIN_FILENO, WL_EVENT_READABLE, handle_ioproc_stdin, NULL);
     }
 
     // watchdog
