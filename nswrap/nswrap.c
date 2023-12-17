@@ -644,6 +644,7 @@ int main(int argc, char **argv) {
                     nswrap_log_errno(WLR_ERROR, NULL, "Failed to chdir to '%s'\n", optarg);
                     exit(1);
                 }
+                break;
             case 't':
                 state.proctitle = strdupa(optarg ?: "");
                 break;
@@ -652,6 +653,7 @@ int main(int argc, char **argv) {
                 break;
             case 'q':
                 state.nosysinfo = true;
+                break;
             default:
                 fprintf(stderr,
                     "usage: %s [options] -dedicated [northstar_options]\n"
