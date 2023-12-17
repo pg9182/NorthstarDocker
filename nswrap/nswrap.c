@@ -1,3 +1,12 @@
+/**
+ * Linux wrapper for the Northstar dedicated server.
+ *
+ * - Requires Linux 3.4+, but 5.3+ is recommended.
+ * - The WINEPREFIX must be created externally.
+ * - Requires Wine 9.0+.
+ * - Requires an assembled Northstar v1.4.0+ game dir  with pg9182's d3d11 and gfsdk stubs.
+ */
+
 // wayland-scanner server-header $(pkg-config --variable=pkgdatadir wayland-protocols)/stable/xdg-shell/xdg-shell.xml nswrap/xdg-shell-protocol.h
 // wayland-scanner server-header $(pkg-config --variable=pkgdatadir wayland-protocols)/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml nswrap/pointer-constraints-unstable-v1-protocol.h
 // gcc -Wall -Wextra -Wno-unused-parameter -Inswrap $(pkg-config --cflags --libs pixman-1 'wlroots >= 0.16.0' wayland-server) nswrap/nswrap.c 
