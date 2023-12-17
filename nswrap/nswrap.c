@@ -8,6 +8,7 @@
 #include <getopt.h>
 #include <limits.h>
 #include <regex.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -18,6 +19,9 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
+#include <sys/sysinfo.h>
+#include <sys/types.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 
 #define WLR_USE_UNSTABLE
@@ -109,6 +113,15 @@ static __attribute__ ((__format__ (__printf__, 2, 3))) int setproctitle(char **a
     return r;
 }
 
+/** Get the number of available logical cores. */
+static int nprocs(void) {
+    int c = get_nprocs_conf();
+    cpu_set_t cs;
+    CPU_ZERO(&cs);
+    sched_getaffinity(0, sizeof(cs), &cs);
+    return CPU_COUNT(&cs) < c ? CPU_COUNT(&cs) : c;
+}
+
 #define __NSWRAP_STATUS_RE_REGEXP(_r, _g) _r
 #define NSWRAP_STATUS_RE_REGEXP NSWRAP_STATUS_RE(__NSWRAP_STATUS_RE_REGEXP, _, _)
 
@@ -122,6 +135,7 @@ static __attribute__ ((__format__ (__printf__, 2, 3))) int setproctitle(char **a
 static struct {
     char **argv;
     const char *proctitle;
+    bool nosysinfo;
 
     struct {
         char *socket;
@@ -611,7 +625,7 @@ int main(int argc, char **argv) {
             getopt_argv[getopt_argc++] = argv[i];
             getopt_argv[getopt_argc] = NULL;
         }
-        while ((opt = getopt(getopt_argc, getopt_argv, "hvC:t::w")) != -1) {
+        while ((opt = getopt(getopt_argc, getopt_argv, "hvC:t::wq")) != -1) {
             switch (opt) {
             case 'v':
                 wlr_log_init(WLR_DEBUG, NULL);
@@ -627,6 +641,8 @@ int main(int argc, char **argv) {
             case 'w':
                 state.watchdog.disable = true;
                 break;
+            case 'q':
+                state.nosysinfo = true;
             default:
                 fprintf(stderr,
                     "usage: %s [options] -dedicated [northstar_options]\n"
@@ -634,7 +650,8 @@ int main(int argc, char **argv) {
                     "  -v        use verbose logging\n"
                     "  -C dir    chdir to the provided directory\n"
                     "  -tlabel   set the process title, including label if provided\n"
-                    "  -w        disable the watchdog timer",
+                    "  -w        disable the watchdog timer\n"
+                    "  -q        do not print system information at startup\n",
                     argv[0] ?: "nswrap");
                 exit(1);
             }
@@ -644,13 +661,27 @@ int main(int argc, char **argv) {
             exit(1);
         }
     }
-
-    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-    prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
-
     if (access("NorthstarLauncher.exe", F_OK)) {
         nswrap_log_errno(WLR_ERROR, NULL, "NorthstarLauncher.exe is missing");
         exit(1);
+    }
+    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
+
+    if (!state.nosysinfo) {
+        int np = nprocs();
+        struct sysinfo sinfo;
+        struct utsname uinfo;
+        if (sysinfo(&sinfo) == -1) {
+            nswrap_log_errno(WLR_ERROR, "sysinfo", "Failed to get sysinfo");
+        } else if (uname(&uinfo) == -1) {
+            nswrap_log_errno(WLR_ERROR, "sysinfo", "Failed to get uname");
+        } else {
+            nswrap_log(WLR_INFO, "sysinfo", "Kernel: %s %s %s %s %s", uinfo.sysname, uinfo.nodename, uinfo.release, uinfo.version, uinfo.machine);
+            nswrap_log(WLR_INFO, "sysinfo", "Processor: %d cores", np);
+            nswrap_log(WLR_INFO, "sysinfo", "Memory: %ld total, %ld free, %ld shared, %ld buffer", sinfo.totalram*sinfo.mem_unit, sinfo.freeram*sinfo.mem_unit, sinfo.sharedram*sinfo.mem_unit, sinfo.bufferram*sinfo.mem_unit);
+            nswrap_log(WLR_INFO, "sysinfo", "Swap: %ld total, %ld free", sinfo.totalswap*sinfo.mem_unit, sinfo.freeswap*sinfo.mem_unit);
+        }
     }
 
     // wayland
@@ -800,6 +831,24 @@ int main(int argc, char **argv) {
     // wine
     {
         size_t i;
+
+        // check wineprefix
+        const char *wineprefix = getenv("WINEPREFIX");
+        if (!wineprefix || *wineprefix != '/' || access(wineprefix, F_OK|R_OK|W_OK|X_OK)) {
+            if (!wineprefix) {
+                nswrap_log(WLR_ERROR, "wine", "WINEPREFIX is not set");
+            } else if (*wineprefix != '/') {
+                nswrap_log(WLR_ERROR, "wine", "Invalid WINEPREFIX '%s': not an absolute path", wineprefix);
+            } else {
+                nswrap_log_errno(WLR_ERROR, "wine", "Invalid WINEPREFIX '%s'", wineprefix);
+            }
+            nswrap_log(WLR_INFO, "wine", "The wineprefix must set HKCU\\Software\\Wine\\WineDbg\\ShowCrashDialog to DWORD:0, and HKCU\\Software\\Wine\\DllOverrides\\{mscoree,mshtml} to REG_SZ:\"\".");
+            nswrap_log(WLR_INFO, "wine", "Optionally, it should also set HKLM\\System\\CurrentControlSet\\Services\\WineBus\\{DisableHidraw,DisableInput} to REG_DWORD:1, HKCU\\Software\\Wine\\Drivers\\Graphics to REG_SZ:\"wayland\", and HKCU\\Software\\Wine\\Drivers\\Audio to REG_SZ:\"\".");
+            nswrap_log(WLR_INFO, "wine", "Also set HKCU\\Software\\Wine\\DllOverrides\\d3d11 to REG_SZ:\"native\" and HKCU\\Software\\Wine\\DllOverrides\\{d3d9,d3d10,d3d12,wined3d,winevulkan} to REG_SZ:\"\".");
+            nswrap_log(WLR_INFO, "wine", "Each instance of nswrap should have its own prefix (to save space, you can symlink files in system32), but it's not (currently) required.");
+            nswrap_log(WLR_INFO, "wine", "You can use the nswrap-wineprefix script to set up a new wineprefix.");
+            goto cleanup;
+        }
 
         // build argv
         i=0;
