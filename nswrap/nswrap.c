@@ -143,7 +143,6 @@ static int nprocs(void) {
 
 static struct {
     char **argv;
-    const char *proctitle;
     bool nosysinfo;
 
     struct {
@@ -186,7 +185,12 @@ static struct {
         bool disable;
         struct wl_event_source *timer;
         struct timespec last;
+        struct wl_listener ioproc_status_updated_listener;
     } watchdog;
+    struct {
+        char *arg; // NULL to disable, label otherwise (empty for no label)
+        struct wl_listener ioproc_status_updated_listener;
+    } proctitle;
     struct {
         char *argv[256];
         char *envp[256];
@@ -196,6 +200,7 @@ static struct {
         int proc_wstatus;
         int shutdown_count;
         struct wl_signal exited;
+        struct wl_listener exited_listener;
     } wine;
 } state;
 
@@ -565,14 +570,14 @@ static void handle_proctitle(struct wl_listener *listener, void *data) {
         putft(*state.ioproc.status.playlist_name, " ???", " %s", state.ioproc.status.playlist_name);
         #undef putf
         #undef putft
-        if (*state.proctitle) {
-            setproctitle(state.argv, "northstar %s [%s]", state.proctitle, buf);
+        if (*state.proctitle.arg) {
+            setproctitle(state.argv, "northstar %s [%s]", state.proctitle.arg, buf);
         } else {
             setproctitle(state.argv, "northstar [%s]", buf);
         }
     } else {
-        if (*state.proctitle) {
-            setproctitle(state.argv, "northstar %s", state.proctitle);
+        if (*state.proctitle.arg) {
+            setproctitle(state.argv, "northstar %s", state.proctitle.arg);
         } else {
             setproctitle(state.argv, "northstar");
         }
@@ -665,7 +670,7 @@ int main(int argc, char **argv) {
                 }
                 break;
             case 't':
-                state.proctitle = strdupa(optarg ?: "");
+                state.proctitle.arg = strdupa(optarg ?: "");
                 break;
             case 'w':
                 state.watchdog.disable = true;
@@ -857,10 +862,8 @@ int main(int argc, char **argv) {
         state.watchdog.timer = wl_event_loop_add_timer(loop, handle_watchdog_timer, NULL);
         wl_event_source_timer_update(state.watchdog.timer, NSWRAP_WATCHDOG_TIMEOUT_INITIAL*1000);
         {
-            struct wl_listener *listener = alloca(sizeof(struct wl_listener));
-            *listener = (struct wl_listener){ .notify = handle_watchdog_title };
-            wl_signal_add(&state.ioproc.status_updated, listener);
-            listener->notify(listener, NULL);
+            state.watchdog.ioproc_status_updated_listener.notify = handle_watchdog_title;
+            wl_signal_add(&state.ioproc.status_updated, &state.watchdog.ioproc_status_updated_listener);
         }
     }
 
@@ -945,9 +948,8 @@ int main(int argc, char **argv) {
         // exit handler
         wl_signal_init(&state.wine.exited);
         {
-            struct wl_listener *listener = alloca(sizeof(struct wl_listener));
-            *listener = (struct wl_listener){ .notify = handle_wine_exited };
-            wl_signal_add(&state.wine.exited, listener);
+            state.wine.exited_listener.notify = handle_wine_exited;
+            wl_signal_add(&state.wine.exited, &state.wine.exited_listener);
         }
 
         // start process
@@ -969,11 +971,10 @@ int main(int argc, char **argv) {
     }
 
     // proctitle
-    if (state.proctitle) {
-        struct wl_listener *listener = alloca(sizeof(struct wl_listener));
-        *listener = (struct wl_listener){ .notify = handle_proctitle };
-        wl_signal_add(&state.ioproc.status_updated, listener);
-        listener->notify(listener, NULL);
+    if (state.proctitle.arg) {
+        state.proctitle.ioproc_status_updated_listener.notify = handle_proctitle;
+        wl_signal_add(&state.ioproc.status_updated, &state.proctitle.ioproc_status_updated_listener);
+        state.proctitle.ioproc_status_updated_listener.notify(&state.proctitle.ioproc_status_updated_listener, NULL);
     }
 
     wl_event_loop_add_signal(loop, SIGCHLD, handle_sigchld, NULL);
