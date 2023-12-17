@@ -70,14 +70,36 @@ static char *getenve(const char *name) {
     return NULL;
 }
 
-/** The current status of a Northstar server */
-struct ns_status {
-    char title[NSWRAP_IOPROC_OUTPUT_CHUNK_SIZE + 1];
-    char map_name[32];
-    char playlist_name[32];
-    int player_count;
-    int max_players;
-};
+/** Replace the process cmdline. It must be initialized by calling it with a NULL fmt first. */
+static __attribute__ ((__format__ (__printf__, 2, 3))) int setproctitle(char **argv, const char *fmt, ...) {
+    // https://github.com/torvalds/linux/commit/d26d0cd97c88eb1a5704b42e41ab443406807810
+    // https://source.chromium.org/chromium/chromium/src/+/master:content/common/set_process_title_linux.cc
+
+    static int argv_len = 0;
+    if (!fmt) {
+        for (char **x = argv; *x; x++) {
+            if (*x != *argv + argv_len) {
+                // next arg is not consecutive, so stop here
+                break;
+            }
+            argv_len += strlen(*x) + 1;
+        }
+        return argv_len;
+    }
+
+    va_list a;
+    va_start(a, fmt);
+    int r = vsnprintf(*argv, argv_len, fmt, a);
+    for (char *x = *argv; x < *argv + argv_len; x++) {
+        if (x == *argv + argv_len-1) {
+            *x = '.';
+        } else if (x >= *argv + r || x == *argv + argv_len-2) {
+            *x = '\0';
+        }
+    }
+    va_end(a);
+    return r;
+}
 
 #define __NSWRAP_STATUS_RE_REGEXP(_r, _g) _r
 #define NSWRAP_STATUS_RE_REGEXP NSWRAP_STATUS_RE(__NSWRAP_STATUS_RE_REGEXP, _, _)
@@ -89,36 +111,10 @@ struct ns_status {
 #define __NSWRAP_STATUS_RE_MATCHES_2(_v) + 1
 #define NSWRAP_STATUS_RE_MATCHES NSWRAP_STATUS_RE(__NSWRAP_STATUS_RE_MATCHES_1, __NSWRAP_STATUS_RE_MATCHES_2, __NSWRAP_STATUS_RE_MATCHES_2)
 
-static void ns_status_str(const struct ns_status *st, char *buf, size_t buf_sz) {
-    #define putf(fmt, ...) do { \
-        if (buf_sz > 0) {       \
-            int r = snprintf(buf, buf_sz, fmt, ##__VA_ARGS__); \
-            if (r >= 0) {       \
-                buf += r;       \
-                buf_sz -= r;    \
-            } else {            \
-                return;         \
-            }                   \
-        }                       \
-    } while (0)
-    #define putft(cond, def, fmt, ...) do { \
-        if (cond) {                         \
-            putf(fmt, ##__VA_ARGS__);       \
-        } else {                            \
-            putf(def);                      \
-        }                                   \
-    } while (0)
-    if (buf) {
-        *buf = '\0';
-        putft(st->player_count >= 0, "?", "%d", st->player_count);
-        putft(st->max_players > 0, "/?", "/%d", st->max_players);
-        putft(*st->map_name, " ???", " %s", st->map_name);
-        putft(*st->playlist_name, " ???", " %s", st->playlist_name);
-    }
-    #undef putf
-}
-
 static struct {
+    char **argv;
+    const char *proctitle;
+
     struct {
         const char *socket;
         struct wl_display *display;
@@ -144,7 +140,15 @@ static struct {
         char b_tit[NSWRAP_IOPROC_OUTPUT_CHUNK_SIZE + 1]; // +1 for the null terminator
         char b_out[NSWRAP_IOPROC_OUTPUT_CHUNK_SIZE * 2 + 32]; // b_inp + b_tit + room for unprocessed escapes
 
-        struct ns_status status;
+        struct {
+            char title[NSWRAP_IOPROC_OUTPUT_CHUNK_SIZE + 1];
+
+            bool parsed;
+            char map_name[32];
+            char playlist_name[32];
+            int player_count;
+            int max_players;
+        } status;
         struct wl_signal status_updated;
     } ioproc;
     struct {
@@ -279,6 +283,7 @@ slow:
                             regerror(rc, &state.ioproc.title_re, err, sizeof(err));
                             nswrap_log(WLR_ERROR, "ioproc", "Failed to match title regex: %s", err);
                         }
+                        state.ioproc.status.parsed = false;
                     } else {
                         int i = 0;
                         #define m_str(_v) \
@@ -288,6 +293,7 @@ slow:
                         NSWRAP_STATUS_RE_GROUPS(m_int, m_str);
                         #undef m_str
                         #undef m_int
+                        state.ioproc.status.parsed = true;
                     }
                 }
                 wl_signal_emit_mutable(&state.ioproc.status_updated, NULL);
@@ -463,6 +469,41 @@ static void handle_wine_exited(struct wl_listener *listener, void *data) {
     }
 }
 
+static void handle_proctitle(struct wl_listener *listener, void *data) {
+    if (state.ioproc.status.parsed) {
+        char buf[512];
+        char *cur = buf, *end = buf + sizeof(buf);
+        #define putf(fmt, ...) do { \
+            if (cur < end) { \
+                int r = snprintf(cur, end - cur, fmt, ##__VA_ARGS__); \
+                if (r >= 0) cur += r; \
+            } \
+        } while (0)
+        #define putft(cond, def, fmt, ...) do { \
+            if (cond) putf(fmt, ##__VA_ARGS__); \
+            else putf("%s", def); \
+        } while (0)
+        *buf = '\0';
+        putft(state.ioproc.status.player_count >= 0, "?", "%d", state.ioproc.status.player_count);
+        putft(state.ioproc.status.max_players > 0, "/?", "/%d", state.ioproc.status.max_players);
+        putft(*state.ioproc.status.map_name, " ???", " %s", state.ioproc.status.map_name);
+        putft(*state.ioproc.status.playlist_name, " ???", " %s", state.ioproc.status.playlist_name);
+        #undef putf
+        #undef putft
+        if (*state.proctitle) {
+            setproctitle(state.argv, "northstar %s [%s]", state.proctitle, buf);
+        } else {
+            setproctitle(state.argv, "northstar [%s]", buf);
+        }
+    } else {
+        if (*state.proctitle) {
+            setproctitle(state.argv, "northstar %s", state.proctitle);
+        } else {
+            setproctitle(state.argv, "northstar");
+        }
+    }
+}
+
 static int handle_sigchld(int signal_number, void *data) {
     pid_t pid;
     int wstatus;
@@ -507,7 +548,31 @@ static int handle_shutdown(int signal_number, void *data) {
 int main(int argc, char **argv) {
     wlr_log_init(WLR_DEBUG, NULL);
 
+    state.argv = argv;
+    state.proctitle = getenv("NSWRAP_PROCTITLE");
+
+    // init setproctitle and attempt to ensure there is a placeholder arg consisting of spaces
+    if (state.proctitle) {
+        if (argc > 0) {
+            if (!argv[argc - 1] || *argv[argc - 1] != ' ') {
+                extern char **environ;
+                char **nargv = alloca(argc + 2*sizeof(char*));
+                memcpy(nargv, argv, argc*sizeof(char*));
+                nargv[argc] = "                                                                                                                                ";
+                nargv[argc+1] = NULL;
+                if (execve("/proc/self/exe", nargv, environ) == -1) {
+                    nswrap_log_errno(WLR_ERROR, NULL, "Failed to self-exec with additional space in argv for process title failed: execve");
+                }
+            } else {
+                argc--;
+                setproctitle(argv, NULL);
+                argv[argc] = NULL;
+            }
+        }
+    }
+
     prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
 
     // wayland
     {
@@ -699,10 +764,18 @@ int main(int argc, char **argv) {
         }
     }
 
+    // proctitle
+    if (state.proctitle) {
+        struct wl_listener *status_updated_listener = alloca(sizeof(struct wl_listener));
+        status_updated_listener->notify = handle_proctitle;
+        wl_signal_add(&state.ioproc.status_updated, status_updated_listener);
+        status_updated_listener->notify(status_updated_listener, NULL);
+    }
+
     wl_event_loop_add_signal(loop, SIGCHLD, handle_sigchld, NULL);
     wl_event_loop_add_signal(loop, SIGINT, handle_shutdown, NULL);
     wl_event_loop_add_signal(loop, SIGTERM, handle_shutdown, NULL);
-    prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
+
     wl_display_run(state.wl.display);
 
 cleanup:
