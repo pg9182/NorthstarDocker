@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <regex.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -116,7 +117,7 @@ static struct {
     const char *proctitle;
 
     struct {
-        const char *socket;
+        char *socket;
         struct wl_display *display;
         struct wlr_backend *backend;
         struct wlr_renderer *renderer;
@@ -576,7 +577,10 @@ int main(int argc, char **argv) {
 
     // wayland
     {
-        state.wl.socket = "/tmp/nswrap-wayland";
+        if (!(state.wl.socket = tempnam(NULL, "nswl."))) {
+            nswrap_log_errno(WLR_ERROR, "wayland", "Failed to create temp file for socket");
+            goto cleanup;
+        }
 
         // initialize wayland
         if (!(state.wl.display = wl_display_create())) {
@@ -707,32 +711,40 @@ int main(int argc, char **argv) {
 
         // build argv
         i=0;
-        state.wine.argv[i++] = "wine64";
-        state.wine.argv[i++] = "NorthstarLauncher.exe";
-        state.wine.argv[i++] = "-dedicated";
+        state.wine.argv[i++] = strdupa("wine64");
+        state.wine.argv[i++] = strdupa("NorthstarLauncher.exe");
+        state.wine.argv[i++] = strdupa("-dedicated");
         for (int j = 2; j < argc; j++) {
             if (i >= sizeof(state.wine.argv)/(sizeof(*state.wine.argv))) {
                 nswrap_log(WLR_ERROR, "wine", "Too many arguments");
                 goto cleanup;
             }
-            state.wine.argv[i++] = argv[j];
+            state.wine.argv[i++] = strdupa(argv[j]);
         }
 
         // build envp
         i=0;
-        state.wine.envp[i++] = "USER=none";
-        state.wine.envp[i++] = getenve("HOME") ?: "HOME=/";
-        state.wine.envp[i++] = getenve("USER") ?: "USER=none";
-        state.wine.envp[i++] = getenve("HOSTNAME") ?: "HOSTNAME=none";
-        state.wine.envp[i++] = getenve("PATH") ?: "PATH=/usr/local/bin:/bin:/usr/bin";
-        state.wine.envp[i++] = getenve("WINEDEBUG") ?: "WINEDEBUG=fixme-secur32,fixme-bcrypt,fixme-ver,err-wldap32";
-        if (!(state.wine.envp[i++] = getenve("WAYLAND_DISPLAY"))) {
-            fprintf(stderr, "wtf: WAYLAND_DISPLAY not set!?!");
-            fflush(stderr);
-            abort();
+        state.wine.envp[i++] = strdupa("USER=none");
+        state.wine.envp[i++] = strdupa(getenve("HOME") ?: "HOME=/");
+        state.wine.envp[i++] = strdupa(getenve("USER") ?: "USER=none");
+        state.wine.envp[i++] = strdupa(getenve("HOSTNAME") ?: "HOSTNAME=none");
+        state.wine.envp[i++] = strdupa(getenve("PATH") ?: "PATH=/usr/local/bin:/bin:/usr/bin");
+        state.wine.envp[i++] = strdupa(getenve("WINEDEBUG") ?: "WINEDEBUG=fixme-secur32,fixme-bcrypt,fixme-ver,err-wldap32");
+        {
+            const char *tmp1 = "WAYLAND_DISPLAY=";
+            const int tmp2 = strlen(state.wl.socket);
+            char *tmp3 = alloca(strlen(tmp1) + tmp2 + 1);
+            memcpy(tmp3, tmp1, strlen(tmp1));
+            memcpy(tmp3 + strlen(tmp1), state.wl.socket, tmp2);
+            tmp3[strlen(tmp1) + tmp2] = '\0';
+            state.wine.envp[i++] = tmp3;
         }
-        if (!(state.wine.envp[i++] = getenve("WINEPREFIX"))) i--;
-        if (!(state.wine.envp[i++] = getenve("WINESERVER"))) i--;
+        if (getenve("WINEPREFIX")) {
+            state.wine.envp[i++] = strdupa(getenve("WINEPREFIX"));
+        }
+        if (getenve("WINESERVER")) {
+            state.wine.envp[i++] = strdupa(getenve("WINESERVER"));
+        }
 
         // errno pipe
         if (pipe2(state.wine.errno_pipe, O_DIRECT | O_NONBLOCK)) {
@@ -742,10 +754,12 @@ int main(int argc, char **argv) {
         wl_event_loop_add_fd(loop, state.wine.errno_pipe[0], WL_EVENT_READABLE, handle_wine_errno, NULL);
 
         // exit handler
-        struct wl_listener *exited_listener = alloca(sizeof(struct wl_listener));
-        exited_listener->notify = handle_wine_exited;
         wl_signal_init(&state.wine.exited);
-        wl_signal_add(&state.wine.exited, exited_listener);
+        {
+            struct wl_listener *listener = alloca(sizeof(struct wl_listener));
+            *listener = (struct wl_listener){ .notify = handle_wine_exited };
+            wl_signal_add(&state.wine.exited, listener);
+        }
 
         // start process
         if (!(state.wine.proc_pid = fork())) {
@@ -766,10 +780,10 @@ int main(int argc, char **argv) {
 
     // proctitle
     if (state.proctitle) {
-        struct wl_listener *status_updated_listener = alloca(sizeof(struct wl_listener));
-        status_updated_listener->notify = handle_proctitle;
-        wl_signal_add(&state.ioproc.status_updated, status_updated_listener);
-        status_updated_listener->notify(status_updated_listener, NULL);
+        struct wl_listener *listener = alloca(sizeof(struct wl_listener));
+        *listener = (struct wl_listener){ .notify = handle_proctitle };
+        wl_signal_add(&state.ioproc.status_updated, listener);
+        listener->notify(listener, NULL);
     }
 
     wl_event_loop_add_signal(loop, SIGCHLD, handle_sigchld, NULL);
@@ -802,6 +816,16 @@ cleanup:
     // wayland
     if (state.wl.display) {
         wl_display_destroy(state.wl.display); // note: this includes most other objects attached to the display
+    }
+    if (state.wl.socket) {
+        const char *tmp1 = ".lock";
+        const int tmp2 = strlen(state.wl.socket);
+        char *tmp3 = alloca(tmp2 + strlen(tmp1) + 1);
+        memcpy(tmp3, state.wl.socket, tmp2);
+        memcpy(tmp3 + strlen(tmp1), tmp1, strlen(tmp1));
+        tmp3[strlen(tmp1) + tmp2] = '\0';
+        remove(state.wl.socket);
+        remove(tmp3);
     }
 
     // reap children
