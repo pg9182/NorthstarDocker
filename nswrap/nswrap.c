@@ -22,6 +22,12 @@
 #include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/util/log.h>
 
+#define nswrap_log(verb, component, fmt, ...) \
+    _wlr_log(verb, "[nswrap/%s] " fmt, component, ##__VA_ARGS__)
+
+#define nswrap_log_errno(verb, component, fmt, ...) \
+    nswrap_log(verb, component, fmt ": %s", ##__VA_ARGS__, strerror(errno))
+
 static struct {
     struct {
         const char                             *socket;
@@ -45,66 +51,80 @@ static int do_sigint(int signal_number, void *data) {
 int main(void) {
     wlr_log_init(WLR_DEBUG, NULL);
 
-    state.wl.socket = "/tmp/nswrap-wayland";
+    // wayland
+    {
+        state.wl.socket = "/tmp/nswrap-wayland";
 
-    // initialize wayland
-    if (!(state.wl.display = wl_display_create())) {
-        wlr_log(WLR_ERROR, "Failed to create wl_display");
-        exit(1);
-    }
-    if (!(state.wl.backend = wlr_headless_backend_create(state.wl.display))) {
-        wlr_log(WLR_ERROR, "Failed to create wlr_headless_backend");
-        exit(1);
-    }
-    if (!wlr_backend_start(state.wl.backend)) {
-        wlr_log(WLR_ERROR, "Failed to start backend");
-        wl_display_destroy(state.wl.display);
-        exit(1);
-    }
-    if (!(state.wl.renderer = wlr_pixman_renderer_create())) {
-        wlr_log(WLR_ERROR, "Failed to create wlr_pixman_renderer");
-        exit(1);
-    }
-    if (wl_display_add_socket(state.wl.display, state.wl.socket)) {
-        wlr_log(WLR_ERROR, "Failed to create socket");
-        exit(1);
-    }
-    if (setenv("WAYLAND_DISPLAY", state.wl.socket, 1)) {
-        wlr_log(WLR_ERROR, "Failed to set env WAYLAND_DISPLAY: %m");
-    }
-    if (unsetenv("DISPLAY")) {
-        wlr_log(WLR_ERROR, "Failed to unset env DISPLAY: %m");
-    }
+        // initialize wayland
+        if (!(state.wl.display = wl_display_create())) {
+            nswrap_log(WLR_ERROR, "wayland", "Failed to create wl_display");
+            goto cleanup;
+        }
+        if (!(state.wl.backend = wlr_headless_backend_create(state.wl.display))) {
+            nswrap_log(WLR_ERROR, "wayland", "Failed to create wlr_headless_backend");
+            goto cleanup;
+        }
+        if (!wlr_backend_start(state.wl.backend)) {
+            nswrap_log(WLR_ERROR, "wayland", "Failed to start backend");
+            goto cleanup;
+        }
+        if (!(state.wl.renderer = wlr_pixman_renderer_create())) {
+            nswrap_log(WLR_ERROR, "wayland", "Failed to create wlr_pixman_renderer");
+            goto cleanup;
+        }
+        if (wl_display_add_socket(state.wl.display, state.wl.socket)) {
+            nswrap_log(WLR_ERROR, "wayland", "Failed to create socket");
+            goto cleanup;
+        }
+        if (setenv("WAYLAND_DISPLAY", state.wl.socket, 1)) {
+            nswrap_log_errno(WLR_ERROR, "wayland", "Failed to set env WAYLAND_DISPLAY");
+            goto cleanup;
+        }
+        if (unsetenv("DISPLAY")) {
+            nswrap_log_errno(WLR_ERROR, "wayland", "Failed to unset env DISPLAY");
+            goto cleanup;
+        }
 
-    // required protocols for winewayland.drv
-    if (!wlr_renderer_init_wl_shm(state.wl.renderer, state.wl.display)) {
-        wlr_log(WLR_ERROR, "Failed to initialize wl_shm on renderer");
-        exit(1);
-    }
-    if (!(state.wl.compositor = wlr_compositor_create(state.wl.display, state.wl.renderer))) {
-        wlr_log(WLR_ERROR, "Failed to create wlr_compositor");
-        exit(1);
-    }
-    if (!(state.wl.subcompositor = wlr_subcompositor_create(state.wl.display))) {
-        wlr_log(WLR_ERROR, "Failed to create wlr_subcompositor");
-        exit(1);
-    }
-    if (!(state.wl.pointer_constraints_v1 = wlr_pointer_constraints_v1_create(state.wl.display))) {
-        wlr_log(WLR_ERROR, "Failed to create wlr_pointer_constraints_v1");
-        exit(1);
-    }
-    if (!(state.wl.relative_pointer_manager_v1 = wlr_relative_pointer_manager_v1_create(state.wl.display))) {
-        wlr_log(WLR_ERROR, "Failed to create wlr_relative_pointer_manager_v1");
-        exit(1);
-    }
-    if (!(state.wl.xdg_shell = wlr_xdg_shell_create(state.wl.display, 5))) {
-        wlr_log(WLR_ERROR, "Failed to create wlr_xdg_shell");
-        exit(1);
+        // required protocols for winewayland.drv
+        if (!wlr_renderer_init_wl_shm(state.wl.renderer, state.wl.display)) {
+            nswrap_log(WLR_ERROR, "wayland", "Failed to initialize wl_shm on renderer");
+            goto cleanup;
+        }
+        if (!(state.wl.compositor = wlr_compositor_create(state.wl.display, state.wl.renderer))) {
+            nswrap_log(WLR_ERROR, "wayland", "Failed to create wlr_compositor");
+            goto cleanup;
+        }
+        if (!(state.wl.subcompositor = wlr_subcompositor_create(state.wl.display))) {
+            nswrap_log(WLR_ERROR, "wayland", "Failed to create wlr_subcompositor");
+            goto cleanup;
+        }
+        if (!(state.wl.pointer_constraints_v1 = wlr_pointer_constraints_v1_create(state.wl.display))) {
+            nswrap_log(WLR_ERROR, "wayland", "Failed to create wlr_pointer_constraints_v1");
+            goto cleanup;
+        }
+        if (!(state.wl.relative_pointer_manager_v1 = wlr_relative_pointer_manager_v1_create(state.wl.display))) {
+            nswrap_log(WLR_ERROR, "wayland", "Failed to create wlr_relative_pointer_manager_v1");
+            goto cleanup;
+        }
+        if (!(state.wl.xdg_shell = wlr_xdg_shell_create(state.wl.display, 5))) {
+            nswrap_log(WLR_ERROR, "wayland", "Failed to create wlr_xdg_shell");
+            goto cleanup;
+        }
     }
 
     struct wl_event_loop *loop = wl_display_get_event_loop(state.wl.display);
     wl_event_loop_add_signal(loop, SIGINT, do_sigint, NULL);
     wl_display_run(state.wl.display);
-    wl_display_destroy(state.wl.display);
-    wlr_renderer_destroy(state.wl.renderer);
+
+cleanup:
+    // wayland
+    {
+        if (state.wl.display) {
+            wl_display_destroy(state.wl.display); // note: this includes most other objects attached to the display
+        }
+        if (state.wl.renderer) {
+            wlr_renderer_destroy(state.wl.renderer);
+        }
+    }
+    return 1;
 }
