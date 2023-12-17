@@ -4,7 +4,7 @@
  * - Requires Linux 3.4+, but 5.3+ is recommended.
  * - The WINEPREFIX must be created externally.
  * - Requires Wine 9.0+.
- * - Requires an assembled Northstar v1.4.0+ game dir  with pg9182's d3d11 and gfsdk stubs.
+ * - Requires an assembled Northstar v1.4.0+ game dir with pg9182's d3d11 and gfsdk stubs.
  */
 
 // wayland-scanner server-header $(pkg-config --variable=pkgdatadir wayland-protocols)/stable/xdg-shell/xdg-shell.xml nswrap/xdg-shell-protocol.h
@@ -716,10 +716,13 @@ int main(int argc, char **argv) {
 
     // wayland
     {
+        nswrap_log(WLR_DEBUG, "wayland", "Initializing");
+
         if (!(state.wl.socket = tempnam(NULL, "nswl."))) {
             nswrap_log_errno(WLR_ERROR, "wayland", "Failed to create temp file for socket");
             goto cleanup;
         }
+        nswrap_log(WLR_DEBUG, "wayland", "WAYLAND_DISPLAY=%s", state.wl.socket);
 
         // initialize wayland
         if (!(state.wl.display = wl_display_create())) {
@@ -799,6 +802,7 @@ int main(int argc, char **argv) {
             nswrap_log_errno(WLR_ERROR, "ioproc", "Failed to get build pty slave filename");
             goto cleanup;
         }
+        nswrap_log(WLR_DEBUG, "ioproc", "%s", state.ioproc.pty_slave_fn);
         if ((state.ioproc.pty_slave_fd = open(state.ioproc.pty_slave_fn, O_RDWR | O_NOCTTY)) == -1) {
             nswrap_log_errno(WLR_ERROR, "ioproc", "Failed to open slave");
             goto cleanup;
@@ -829,6 +833,7 @@ int main(int argc, char **argv) {
             goto cleanup;
         }
         state.ioproc.isatty = !!isatty(STDOUT_FILENO);
+        nswrap_log(WLR_DEBUG, "ioproc", "isatty=%d", state.ioproc.isatty);
 
         int rc;
         #define x(_n, _r, _g) _r
@@ -899,6 +904,9 @@ int main(int argc, char **argv) {
             }
             state.wine.argv[i++] = strdupa(argv[j]);
         }
+        for (i = 0; state.wine.argv[i]; i++) {
+            nswrap_log(WLR_DEBUG, "wine", "argv[%3zu] %s", i, state.wine.argv[i]);
+        }
 
         // build envp
         i=0;
@@ -922,6 +930,9 @@ int main(int argc, char **argv) {
         }
         if (getenve("WINESERVER")) {
             state.wine.envp[i++] = strdupa(getenve("WINESERVER"));
+        }
+        for (i = 0; state.wine.envp[i]; i++) {
+            nswrap_log(WLR_DEBUG, "wine", "envp[%3zu] %s", i, state.wine.envp[i]);
         }
 
         // errno pipe
@@ -954,6 +965,7 @@ int main(int argc, char **argv) {
             close(state.wine.errno_pipe[1]);
             _exit(127);
         }
+        nswrap_log(WLR_DEBUG, "wine", "pid %d", (int)(state.wine.proc_pid));
     }
 
     // proctitle
