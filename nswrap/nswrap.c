@@ -2,7 +2,8 @@
 // wayland-scanner server-header $(pkg-config --variable=pkgdatadir wayland-protocols)/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml nswrap/pointer-constraints-unstable-v1-protocol.h
 // gcc -Wall -Wextra -Wno-unused-parameter -Inswrap $(pkg-config --cflags --libs pixman-1 'wlroots >= 0.16.0' wayland-server) nswrap/nswrap.c 
 
-#define WLR_USE_UNSTABLE
+#define _GNU_SOURCE
+#include <errno.h>
 #include <fcntl.h>
 #include <regex.h>
 #include <signal.h>
@@ -14,7 +15,10 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <sys/prctl.h>
+#include <sys/wait.h>
 
+#define WLR_USE_UNSTABLE
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
 #include <wlr/backend/session.h>
@@ -29,7 +33,7 @@
 #include <wlr/util/log.h>
 
 #define nswrap_log(verb, component, fmt, ...) \
-    _wlr_log(verb, "[nswrap/%s] " fmt, component, ##__VA_ARGS__)
+    _wlr_log(verb, "[nswrap/%s] " fmt, component ?: "core", ##__VA_ARGS__)
 
 #define nswrap_log_errno(verb, component, fmt, ...) \
     nswrap_log(verb, component, fmt ": %s", ##__VA_ARGS__, strerror(errno))
@@ -42,6 +46,23 @@
     " - ([A-Za-z0-9_]+) ([0-9]+)/([0-9]+) players \\(([A-Za-z0-9_]+)\\)", \
     _str(map_name) _int(player_count) _int(max_players) _str(playlist_name) \
 )
+
+/** Like getenv, but gets the entire variable. */
+static char *getenve(const char *name) {
+    extern char **environ;
+    int i;
+    size_t l = strlen(name);
+    if (!environ || !*name || strchr(name, '=')) {
+        return NULL;
+    }
+    for (i = 0; environ[i] && (strncmp(name, environ[i], l) || environ[i][l] != '='); i++) {
+        continue;
+    }
+    if (environ[i]) {
+        return environ[i];
+    }
+    return NULL;
+}
 
 /** The current status of a Northstar server */
 struct ns_status {
@@ -120,11 +141,60 @@ static struct {
         struct ns_status status;
         struct wl_signal status_updated;
     } ioproc;
+    struct {
+        char *argv[256];
+        char *envp[256];
+        int errno_pipe[2];
+        pid_t pid;
+        bool exited;
+        int wstatus;
+        int shutdown_count;
+    } wine;
 } state;
 
-static int handle_sigint(int signal_number, void *data) {
-    wlr_log(WLR_ERROR, "sigint");
-    wl_display_terminate(state.wl.display);
+static int handle_shutdown(int signal_number, void *data) {
+    if (state.wine.pid) {
+        switch (++state.wine.shutdown_count) {
+        case 1:
+            nswrap_log(WLR_INFO, NULL, "Received first shutdown signal, requesting game server exit");
+            kill(state.wine.pid, SIGTERM);
+            // TODO: send proper quit to server
+            break;
+        case 2:
+            nswrap_log(WLR_INFO, NULL, "Received second shutdown signal, terminating wine");
+            kill(state.wine.pid, SIGTERM);
+            break;
+        case 3:
+            nswrap_log(WLR_INFO, NULL, "Received third shutdown signal, killing wine");
+            kill(state.wine.pid, SIGKILL);
+            break;
+        default:
+            nswrap_log(WLR_INFO, NULL, "Received multiple shutdown signals, forcefully terminating");
+            wl_display_terminate(state.wl.display);
+            break;
+        }
+    } else {
+        wl_display_terminate(state.wl.display);
+    }
+    return 0;
+}
+
+static int handle_sigchld(int signal_number, void *data) {
+    pid_t pid;
+    int wstatus;
+    while ((pid = waitpid(-1, &wstatus, WNOHANG)) > 0) {
+        if (pid == state.wine.pid) {
+            state.wine.pid = 0;
+            state.wine.exited = true;
+            state.wine.wstatus = wstatus;
+            if (WIFSIGNALED(state.wine.wstatus)) {
+                nswrap_log(WLR_INFO, "wine", "Wine killed by signal %d", WTERMSIG(state.wine.wstatus));
+            } else {
+                nswrap_log(WLR_INFO, "wine", "Wine exited with status %d", WEXITSTATUS(state.wine.wstatus));
+            }
+            wl_display_terminate(state.wl.display);
+        }
+    }
     return 0;
 }
 
@@ -385,13 +455,27 @@ slow:
             break;
         }
     }
-    fwrite(state.ioproc.b_inp, 1, state.ioproc.n_inp, stdout);
+    fwrite(state.ioproc.b_out, 1, state.ioproc.n_out, stdout);
     fflush(stdout);
     return 0;
 }
 
-int main(void) {
+static int handle_wine_errno(int fd, uint32_t mask, void *data) {
+    int n;
+    if (read(state.wine.errno_pipe[0], &n, sizeof(n)) == -1) {
+        nswrap_log_errno(WLR_ERROR, "wine", "Failed to start process, and failed to read errno pipe");
+    } else {
+        errno = n;
+        nswrap_log_errno(WLR_ERROR, "wine", "Failed to start process");
+    }
+    wl_display_terminate(state.wl.display);
+    return 0;
+}
+
+int main(int argc, char **argv) {
     wlr_log_init(WLR_DEBUG, NULL);
+
+    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
 
     // wayland
     {
@@ -520,25 +604,133 @@ int main(void) {
         wl_event_loop_add_fd(loop, state.ioproc.pty_master_fd, WL_EVENT_READABLE, handle_ioproc_master, NULL);
     }
 
-    wl_event_loop_add_signal(loop, SIGINT, handle_sigint, NULL);
+    // wine
+    {
+        size_t i;
 
+        // build argv
+        i=0;
+        state.wine.argv[i++] = "wine64";
+        state.wine.argv[i++] = "NorthstarLauncher.exe";
+        state.wine.argv[i++] = "-dedicated";
+        for (int j = 2; j < argc; j++) {
+            if (i >= sizeof(state.wine.argv)/(sizeof(*state.wine.argv))) {
+                nswrap_log(WLR_ERROR, "wine", "Too many arguments");
+                goto cleanup;
+            }
+            state.wine.argv[i++] = argv[j];
+        }
+
+        // build envp
+        i=0;
+        state.wine.envp[i++] = "USER=none";
+        state.wine.envp[i++] = getenve("HOME") ?: "HOME=/";
+        state.wine.envp[i++] = getenve("USER") ?: "USER=none";
+        state.wine.envp[i++] = getenve("HOSTNAME") ?: "HOSTNAME=none";
+        state.wine.envp[i++] = getenve("PATH") ?: "PATH=/usr/local/bin:/bin:/usr/bin";
+        state.wine.envp[i++] = getenve("WINEDEBUG") ?: "WINEDEBUG=fixme-secur32,fixme-bcrypt,fixme-ver,err-wldap32";
+        if (!(state.wine.envp[i++] = getenve("WAYLAND_DISPLAY"))) {
+            fprintf(stderr, "wtf: WAYLAND_DISPLAY not set!?!");
+            fflush(stderr);
+            abort();
+        }
+        if (!(state.wine.envp[i++] = getenve("WINEPREFIX"))) i--;
+        if (!(state.wine.envp[i++] = getenve("WINESERVER"))) i--;
+
+        if (pipe2(state.wine.errno_pipe, O_DIRECT | O_NONBLOCK)) {
+            nswrap_log_errno(WLR_ERROR, "wine", "Failed to create errno pipe");
+            return 1;
+        }
+        wl_event_loop_add_fd(loop, state.wine.errno_pipe[0], WL_EVENT_READABLE, handle_wine_errno, NULL);
+
+        // start process
+        if (!(state.wine.pid = fork())) {
+            setsid();
+            ioctl(state.ioproc.pty_slave_fd, TIOCSCTTY, 0);
+            dup2(state.ioproc.pty_slave_fd, 0);
+            dup2(state.ioproc.pty_slave_fd, 1);
+            dup2(state.ioproc.pty_slave_fd, 2);
+            close(state.ioproc.pty_slave_fd);
+            close(state.wine.errno_pipe[0]);
+            execvpe(state.wine.argv[0], state.wine.argv, state.wine.envp);
+            const int n = errno;
+            write(state.wine.errno_pipe[1], &n, sizeof(n));
+            close(state.wine.errno_pipe[1]);
+            _exit(127);
+        }
+    }
+
+    wl_event_loop_add_signal(loop, SIGCHLD, handle_sigchld, NULL);
+    wl_event_loop_add_signal(loop, SIGINT, handle_shutdown, NULL);
+    wl_event_loop_add_signal(loop, SIGTERM, handle_shutdown, NULL);
+    prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
     wl_display_run(state.wl.display);
 
 cleanup:
-    // wayland
-    {
-        if (state.ioproc.pty_slave_fd > 0) {
-            close(state.ioproc.pty_slave_fd);
-        }
-        if (state.ioproc.pty_master_fd > 0) {
-            close(state.ioproc.pty_master_fd);
-        }
-        if (state.wl.display) {
-            wl_display_destroy(state.wl.display); // note: this includes most other objects attached to the display
-        }
-        if (state.wl.renderer) {
-            wlr_renderer_destroy(state.wl.renderer);
+    nswrap_log(WLR_INFO, NULL, "Cleaning up");
+
+    // wine
+    if (state.wine.pid && !state.wine.exited) {
+        nswrap_log(WLR_INFO, "wine", "Wine hasn't exited; killing");
+        if (kill(state.wine.pid, SIGKILL)) {
+            if (errno != ESRCH) {
+                nswrap_log_errno(WLR_ERROR, "wine", "Failed to kill pid %d", (int)(state.wine.pid));
+            }
         }
     }
-    return 1;
+
+    // ioproc
+    if (state.ioproc.pty_slave_fd > 0) {
+        close(state.ioproc.pty_slave_fd);
+    }
+    if (state.ioproc.pty_master_fd > 0) {
+        close(state.ioproc.pty_master_fd);
+    }
+
+    // wayland
+    if (state.wl.display) {
+        wl_display_destroy(state.wl.display); // note: this includes most other objects attached to the display
+    }
+
+    // reap children
+    {
+        nswrap_log(WLR_INFO, NULL, "Waiting for children to exit");
+        struct timespec ts, tc;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        tc = ts;
+        for (;;) {
+            pid_t pid;
+            int wstatus;
+            switch ((pid = waitpid(-1, &wstatus, WNOHANG))) {
+            case -1:
+                if (errno != EINTR) {
+                    if (errno != ECHILD) {
+                        nswrap_log_errno(WLR_INFO, NULL, "Failed to wait for children");
+                    }
+                    goto doneReap; // no children
+                }
+                continue; // interrupted, try again immediately
+            case 0:
+                clock_gettime(CLOCK_MONOTONIC, &tc);
+                if (tc.tv_sec - ts.tv_sec > 4) {
+                    nswrap_log(WLR_ERROR, NULL, "Children did not exit in time");
+                    goto doneReap;
+                } else {
+                    nanosleep(&(struct timespec){
+                        .tv_nsec = 100 * 1000 * 1000,
+                    }, NULL);
+                }
+                continue; // children exist, but haven't changed state; try again
+            default:
+                if (pid == state.wine.pid) {
+                    state.wine.exited = true;
+                    state.wine.wstatus = wstatus;
+                }
+                continue; // child reaped; try another one immediately
+            }
+        }
+        doneReap:;
+    }
+
+    return state.wine.shutdown_count ? 0 : 1;
 }
