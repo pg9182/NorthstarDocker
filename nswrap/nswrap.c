@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <limits.h>
 #include <regex.h>
 #include <signal.h>
@@ -547,33 +548,76 @@ static int handle_shutdown(int signal_number, void *data) {
 }
 
 int main(int argc, char **argv) {
-    wlr_log_init(WLR_DEBUG, NULL);
-
-    state.argv = argv;
-    state.proctitle = getenv("NSWRAP_PROCTITLE");
-
     // init setproctitle and attempt to ensure there is a placeholder arg consisting of spaces
-    if (state.proctitle) {
-        if (argc > 0) {
-            if (!argv[argc - 1] || *argv[argc - 1] != ' ') {
-                extern char **environ;
-                char **nargv = alloca(argc + 2*sizeof(char*));
-                memcpy(nargv, argv, argc*sizeof(char*));
-                nargv[argc] = "                                                                                                                                ";
-                nargv[argc+1] = NULL;
-                if (execve("/proc/self/exe", nargv, environ) == -1) {
-                    nswrap_log_errno(WLR_ERROR, NULL, "Failed to self-exec with additional space in argv for process title failed: execve");
-                }
-            } else {
-                argc--;
-                setproctitle(argv, NULL);
-                argv[argc] = NULL;
+    if (argc > 0) {
+        if (!argv[argc - 1] || *argv[argc - 1] != ' ') {
+            extern char **environ;
+            char **nargv = alloca((argc + 2)*sizeof(char*));
+            memcpy(nargv, argv, argc*sizeof(char*));
+            nargv[argc] = "                                                                                                                                ";
+            nargv[argc+1] = NULL;
+            if (execve("/proc/self/exe", nargv, environ) == -1) {
+                fprintf(stderr, "warning: failed to self-exec with additional space in argv for process title failed: execve: %s\n", strerror(errno));
             }
+        } else {
+            argc--;
+            setproctitle(argv, NULL);
+            argv[argc] = NULL;
+        }
+    }
+    state.argv = argv;
+
+    wlr_log_init(WLR_INFO, NULL);
+    {
+        int opt;
+        bool has_dedicated = false;
+        int getopt_argc = 0;
+        char **getopt_argv = alloca(argc * sizeof(char*) + 1);
+        for (int i = 0; i < argc; i++) {
+            if (i && !strcmp(argv[i], "-dedicated")) {
+                has_dedicated = true;
+                break;
+            }
+            getopt_argv[getopt_argc++] = argv[i];
+            getopt_argv[getopt_argc] = NULL;
+        }
+        while ((opt = getopt(getopt_argc, getopt_argv, "hvC:t::")) != -1) {
+            switch (opt) {
+            case 'v':
+                wlr_log_init(WLR_DEBUG, NULL);
+                break;
+            case 'C':
+                if (chdir(optarg)) {
+                    nswrap_log_errno(WLR_ERROR, NULL, "Failed to chdir to '%s'\n", optarg);
+                    exit(1);
+                }
+            case 't':
+                state.proctitle = strdupa(optarg ?: "");
+                break;
+            default:
+                fprintf(stderr,
+                    "usage: %s [options] -dedicated [northstar_options]\n"
+                    "  -h        show this help text\n"
+                    "  -v        use verbose logging\n"
+                    "  -C dir    chdir to the provided directory\n"
+                    "  -tlabel   set the process title, including label if provided\n",
+                    argv[0] ?: "nswrap");
+                exit(1);
+            }
+        }
+        if (!has_dedicated) {
+            nswrap_log_errno(WLR_ERROR, NULL, "Must contain -dedicated argument (see `%s -h`)\n", argv[0] ?: "nswrap");
+            exit(1);
         }
     }
 
     prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
+
+    if (access("NorthstarLauncher.exe", F_OK)) {
+        nswrap_log_errno(WLR_ERROR, NULL, "NorthstarLauncher.exe is missing");
+        exit(1);
+    }
 
     // wayland
     {
@@ -689,7 +733,7 @@ int main(int argc, char **argv) {
             nswrap_log_errno(WLR_ERROR, "ioproc", "Failed to set pty slave winsize");
             goto cleanup;
         }
-        state.ioproc.isatty = !!isatty(STDIN_FILENO);
+        state.ioproc.isatty = !!isatty(STDOUT_FILENO);
 
         int rc;
         #define x(_n, _r, _g) _r
@@ -714,7 +758,7 @@ int main(int argc, char **argv) {
         state.wine.argv[i++] = strdupa("wine64");
         state.wine.argv[i++] = strdupa("NorthstarLauncher.exe");
         state.wine.argv[i++] = strdupa("-dedicated");
-        for (int j = 2; j < argc; j++) {
+        for (int j = optind; j < argc; j++) {
             if (i >= sizeof(state.wine.argv)/(sizeof(*state.wine.argv))) {
                 nswrap_log(WLR_ERROR, "wine", "Too many arguments");
                 goto cleanup;
@@ -869,5 +913,5 @@ cleanup:
         doneReap:;
     }
 
-    return state.wine.shutdown_count ? 0 : 1;
+    exit(state.wine.shutdown_count ? 0 : 1);
 }
