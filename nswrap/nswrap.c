@@ -40,10 +40,16 @@
 #define nswrap_log_errno(verb, component, fmt, ...) \
     nswrap_log(verb, component, fmt ": %s", ##__VA_ARGS__, strerror(errno))
 
-/** Whether to pass-through the title if stdout is a TTY. **/
+/** Watchdog timeout (initial). */
+#define NSWRAP_WATCHDOG_TIMEOUT_INITIAL (4*60)
+
+/** Watchdog timeout. */
+#define NSWRAP_WATCHDOG_TIMEOUT 30
+
+/** Whether to pass-through the title if stdout is a TTY. */
 #define NSWRAP_IOPROC_TTY_TITLE true
 
-/** Whether to pass-through colors if stdout is a TTY. **/
+/** Whether to pass-through colors if stdout is a TTY. */
 #define NSWRAP_IOPROC_TTY_COLOR true
 
 /** The chunk size for console i/o (also the maximum length of a parsed title). */
@@ -153,6 +159,11 @@ static struct {
         } status;
         struct wl_signal status_updated;
     } ioproc;
+    struct {
+        bool disable;
+        struct wl_event_source *timer;
+        struct timespec last;
+    } watchdog;
     struct {
         char *argv[256];
         char *envp[256];
@@ -451,6 +462,25 @@ slow:
     return 0;
 }
 
+static int handle_watchdog_timer(void *data) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+    if (state.watchdog.last.tv_sec) {
+        nswrap_log(WLR_ERROR, "watchdog", "Did not receive a title update in time (%ds): last tick was %lds ago", NSWRAP_WATCHDOG_TIMEOUT, (long)(ts.tv_sec - state.watchdog.last.tv_sec));
+    } else {
+        nswrap_log(WLR_ERROR, "watchdog", "Did not receive initial title update in time (%ds)", NSWRAP_WATCHDOG_TIMEOUT_INITIAL);
+    }
+    wl_display_terminate(state.wl.display);
+    return 0;
+}
+
+static void handle_watchdog_title(struct wl_listener *listener, void *data) {
+    if (state.ioproc.status.parsed) {
+        clock_gettime(CLOCK_MONOTONIC_COARSE, &state.watchdog.last);
+        wl_event_source_timer_update(state.watchdog.timer, NSWRAP_WATCHDOG_TIMEOUT*1000);
+    }
+}
+
 static int handle_wine_errno(int fd, uint32_t mask, void *data) {
     int n;
     if (read(state.wine.errno_pipe[0], &n, sizeof(n)) == -1) {
@@ -581,7 +611,7 @@ int main(int argc, char **argv) {
             getopt_argv[getopt_argc++] = argv[i];
             getopt_argv[getopt_argc] = NULL;
         }
-        while ((opt = getopt(getopt_argc, getopt_argv, "hvC:t::")) != -1) {
+        while ((opt = getopt(getopt_argc, getopt_argv, "hvC:t::w")) != -1) {
             switch (opt) {
             case 'v':
                 wlr_log_init(WLR_DEBUG, NULL);
@@ -594,13 +624,17 @@ int main(int argc, char **argv) {
             case 't':
                 state.proctitle = strdupa(optarg ?: "");
                 break;
+            case 'w':
+                state.watchdog.disable = true;
+                break;
             default:
                 fprintf(stderr,
                     "usage: %s [options] -dedicated [northstar_options]\n"
                     "  -h        show this help text\n"
                     "  -v        use verbose logging\n"
                     "  -C dir    chdir to the provided directory\n"
-                    "  -tlabel   set the process title, including label if provided\n",
+                    "  -tlabel   set the process title, including label if provided\n"
+                    "  -w        disable the watchdog timer",
                     argv[0] ?: "nswrap");
                 exit(1);
             }
@@ -747,6 +781,20 @@ int main(int argc, char **argv) {
 
         wl_signal_init(&state.ioproc.status_updated);
         wl_event_loop_add_fd(loop, state.ioproc.pty_master_fd, WL_EVENT_READABLE, handle_ioproc_master, NULL);
+    }
+
+    // watchdog
+    if (!state.watchdog.disable) {
+        nswrap_log(WLR_DEBUG, "watchdog", "Initializing");
+
+        state.watchdog.timer = wl_event_loop_add_timer(loop, handle_watchdog_timer, NULL);
+        wl_event_source_timer_update(state.watchdog.timer, NSWRAP_WATCHDOG_TIMEOUT_INITIAL*1000);
+        {
+            struct wl_listener *listener = alloca(sizeof(struct wl_listener));
+            *listener = (struct wl_listener){ .notify = handle_watchdog_title };
+            wl_signal_add(&state.ioproc.status_updated, listener);
+            listener->notify(listener, NULL);
+        }
     }
 
     // wine
