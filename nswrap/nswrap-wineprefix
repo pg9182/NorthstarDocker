@@ -43,3 +43,7 @@ wine64 reg add 'HKCU\Software\Wine\DllOverrides' /v 'd3d11' /t REG_SZ /d 'native
 wine64 reg add 'HKCU\Software\Wine\DllOverrides' /v 'd3d12' /t REG_SZ /d '' /f
 wine64 reg add 'HKCU\Software\Wine\DllOverrides' /v 'wined3d' /t REG_SZ /d '' /f
 wine64 reg add 'HKCU\Software\Wine\DllOverrides' /v 'winevulkan' /t REG_SZ /d '' /f
+
+# FIXME: temporary workaround for one of the timescale issues
+wine64 reg add 'HKCU\Software\Wine\Explorer' /v 'Desktop' /t REG_SZ /d 'Default' /f
+wine64 reg add 'HKCU\Software\Wine\Explorer\Desktops' /v 'Default' /t REG_SZ /d '800x600' /f
