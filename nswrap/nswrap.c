@@ -918,7 +918,7 @@ int main(int argc, char **argv) {
         state.wine.envp[i++] = strdupa(getenve("USER") ?: "USER=none");
         state.wine.envp[i++] = strdupa(getenve("HOSTNAME") ?: "HOSTNAME=none");
         state.wine.envp[i++] = strdupa(getenve("PATH") ?: "PATH=/usr/local/bin:/bin:/usr/bin");
-        state.wine.envp[i++] = strdupa(getenve("WINEDEBUG") ?: "WINEDEBUG=fixme-secur32,fixme-bcrypt,fixme-ver,err-wldap32");
+        state.wine.envp[i++] = strdupa(getenve("WINEDEBUG") ?: "WINEDEBUG=+msgbox,fixme-secur32,fixme-bcrypt,fixme-ver,err-wldap32");
         {
             const char *tmp1 = "WAYLAND_DISPLAY=";
             const int tmp2 = strlen(state.wl.socket);
