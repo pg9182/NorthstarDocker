@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 FROM debian:bookworm AS base
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates tzdata libfreetype6 libgnutls30 libfontconfig1 libunwind8 libc6 libgcc-s1 libncurses6 && apt-get clean
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates tzdata libc6 libgcc-s1 && apt-get clean
 
 FROM base AS build
 
@@ -271,22 +271,24 @@ RUN for x in \
         fi ; \
     done
 
+# copy non-libc libraries into our lib dir
+RUN grep --text -Paro 'lib[A-Za-z0-9_.]+\.so[.0-9]+\x00' /opt/northstar-runtime/lib64/wine/x86_64-unix | tr -d "\0" | \
+    grep -Fve :libc.so -e :libm.so -e :libnetapi.so -e :libOSMesa.so -e :libgssapi_krb5.so -e :libkrb5.so | cut -d: -f2 | \
+    xargs printf "/lib/x86_64-linux-gnu/%s\n" | xargs lddtree --list | \
+    grep -Fv -e /libc.so -e /ld-linux -e /libm.so -e /libpthread -e /libgcc | sort -u | \
+    xargs cp -vt /opt/northstar-runtime/lib64/
+
+# ensure we have some libs we know we need
+RUN for lib in libgnutls libfontconfig libfreetype libunwind ; do \
+    if [ ! -f /opt/northstar-runtime/lib64/$lib.so* ] ; then \
+    echo "missing lib $lib (why wasn't it copied earlier?)" ; exit 1 ; fi ; done
+
 # compile nswrap
 COPY ./nswrap.c /
 RUN gcc -Wall -Wextra /nswrap.c -o /opt/northstar-runtime/bin/nswrap
 
-FROM base AS stage
-COPY --from=build /opt/northstar-runtime /opt/northstar-runtime
-
-# ensure we have the runtime wine deps we care about
-# note: see https://wiki.winehq.org/Building_Wine for what these are for
-RUN grep --text -Paro 'lib[A-Za-z0-9_.]+\.so[.0-9]+\x00' /opt/northstar-runtime/lib64/wine/x86_64-unix | tr -d "\0" | \
-    grep -Fve :libc.so -e :libm.so -e :libnetapi.so -e :libOSMesa.so -e :libgssapi_krb5.so -e :libkrb5.so | cut -d: -f2 | \
-    xargs printf "/lib/x86_64-linux-gnu/%s\n" | while read fn ; do \
-    if [ ! -f $fn ] ; then echo "missing library $fn" ; exit 1 ; fi ; done
-
 FROM base
-COPY --from=stage /opt/northstar-runtime /opt/northstar-runtime
+COPY --from=build /opt/northstar-runtime /opt/northstar-runtime
 # if you're getting weird error messages from wine (e.g., failed to create desktop window), uncomment the next line to see if it's a host dependency (missing or mismatch) issue
 # FROM build
 WORKDIR /mnt

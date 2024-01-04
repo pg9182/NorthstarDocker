@@ -1056,6 +1056,7 @@ int main(int argc, char **argv) {
         wine_envp[i++] = strdup("WINEARCH=win64");
         if (state.cfg.extwine) {
             wine_envp[i++] = strdup(getenve("PATH") ?: "PATH=/usr/local/bin:/usr/bin:/bin");
+            if (getenve("LD_LIBRARY_PATH")) wine_envp[i++] = strdup(getenve("LD_LIBRARY_PATH"));
             if (getenve("WINEPREFIX")) wine_envp[i++] = strdup(getenve("WINEPREFIX"));
             else {
                 NSLOG_ERR("since NSWRAP_EXTWINE is enabled, WINEPREFIX must be set");
@@ -1068,6 +1069,8 @@ int main(int argc, char **argv) {
         } else {
             char tmp[sizeof(state.cfg.dir)*2];
             snprintf(tmp, sizeof(tmp), "PATH=%s/bin", state.cfg.dir);
+            wine_envp[i++] = strdup(tmp);
+            snprintf(tmp, sizeof(tmp), "LD_LIBRARY_PATH=%s/lib64", state.cfg.dir);
             wine_envp[i++] = strdup(tmp);
             snprintf(tmp, sizeof(tmp), "WINEPREFIX=%s/prefix", state.cfg.dir);
             wine_envp[i++] = strdup(tmp);
