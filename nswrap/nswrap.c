@@ -2,7 +2,7 @@
  * nswrap v2
  *
  * - dependencies:
- *   - linux 5.4+ (why: setproctitle, signalfd, timerfd, pidfd, pidfd_send_signal, pidfd poll, clone3, waitid p_pidfd, etc)
+ *   - linux 5.2+ (why: setproctitle, signalfd, timerfd, etc)
  *   - wine 9.0+ 64-bit (why: works properly with r2 with nulldrv, relocatable wine lib dir, other fixes)
  *     - must have prepared wineprefix
  *     - must be patched to use nulldrv by default
@@ -10,7 +10,7 @@
  *     - must have mscoree/mshtml/winemenubuilder disabled with dll override or removed (why: so they don't interfere with stuff by showing dialogs about installing mono/gecko)
  *     - must have HKCU\Software\Wine\WineDbg\ShowCrashDialog=REG_DWORD:1 (why: so crash dialogs don't just sit there invisible)
  *     - must have HKCU\Software\Wine\Version=REG_SZ:win10
- *     - must have wine optional deps: libunwind, openssl, gmp, gnutls, libcap2, libxml2, libpcre2, liblzma, libjpeg, libgssapi, freetype, ncurses
+ *     - must have wine runtime deps: libunwind, gnutls, freetype, fontconfig
  *     - must have host tzdata/ca_certificates/resolv
  *     - wineserver persistence should be disabled for faster cleanup
  *   - glibc (why: works properly with wine and ns)
@@ -51,7 +51,6 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/sched.h>
 #include <poll.h>
 #include <regex.h>
 #include <sched.h>
@@ -247,7 +246,6 @@ static struct {
 
     struct {
         int errno_pipe[2];
-        int pfd;
         pid_t pid;
         bool exited;
         bool reaped;
@@ -751,14 +749,18 @@ static void handle_sig_shutdown(void) {
         break;
     case 1:
         NSLOG_INF("received second shutdown signal, terminating wine");
-        if (syscall(SYS_pidfd_send_signal, state.wine.pfd, SIGTERM, NULL, 0) == -1) {
-            NSLOG_ERRNO("failed to kill wine (pid=%d)", (int)(state.wine.pid));
+        if (!state.wine.exited) {
+            if (kill(state.wine.pid, SIGTERM) == -1) {
+                NSLOG_ERRNO("failed to kill wine (pid=%d)", (int)(state.wine.pid));
+            }
         }
         break;
     case 2:
         NSLOG_INF("received third shutdown signal, killing wine");
-        if (syscall(SYS_pidfd_send_signal, state.wine.pfd, SIGKILL, NULL, 0) == -1) {
-            NSLOG_ERRNO("failed to kill wine (pid=%d)", (int)(state.wine.pid));
+        if (!state.wine.exited) {
+            if (kill(state.wine.pid, SIGKILL) == -1) {
+                NSLOG_ERRNO("failed to kill wine (pid=%d)", (int)(state.wine.pid));
+            }
         }
         break;
     case 3:
@@ -845,7 +847,8 @@ int main(int argc, char **argv) {
     }
 
     if (access("NorthstarLauncher.exe", F_OK)) {
-        NSLOG_ERR("NorthstarLauncher.exe does not exist in the current directory");
+        char tmp[1024];
+        NSLOG_ERR("NorthstarLauncher.exe does not exist in the current directory (%s)", getcwd(tmp, sizeof(tmp)) ?: "?");
         goto cleanup;
     }
 
@@ -1049,7 +1052,7 @@ int main(int argc, char **argv) {
         wine_envp[i++] = strdup("USER=nswrap");
         wine_envp[i++] = strdup("HOSTNAME=none");
         wine_envp[i++] = strdup(getenve("HOME") ?: "HOME=/");
-        wine_envp[i++] = strdup(getenve("WINEDEBUG") ?: "WINEDEBUG=+msgbox,fixme-secur32,fixme-bcrypt,fixme-ver,err-wldap32");
+        wine_envp[i++] = strdup(getenve("WINEDEBUG") ?: "WINEDEBUG=+msgbox,fixme-secur32,fixme-bcrypt,fixme-ver,err-wldap32,err-kerberos,err-ntlm");
         wine_envp[i++] = strdup("WINEARCH=win64");
         if (state.cfg.extwine) {
             wine_envp[i++] = strdup(getenve("PATH") ?: "PATH=/usr/local/bin:/usr/bin:/bin");
@@ -1100,17 +1103,8 @@ int main(int argc, char **argv) {
             NSLOG_WRNNO("failed to set PR_SET_CHILD_SUBREAPER=1 (grandchildren may not be reaped)");
         }
 
-        struct clone_args clone_args = {
-            .pidfd = (uint64_t)((uintptr_t)(&state.wine.pfd)),
-            .flags = CLONE_PIDFD,
-            .exit_signal = SIGCHLD,
-        };
-        if ((state.wine.pid = syscall(SYS_clone3, &clone_args, sizeof(clone_args))) == -1) {
-            if (errno == ENOSYS || errno == EPERM) {
-                NSLOG_ERRNO("failed to start process: clone3 (is your kernel older than 5.2 or a seccomp filter blocking it)");
-            } else {
-                NSLOG_ERRNO("failed to start process: clone3");
-            }
+        if ((state.wine.pid = fork()) == -1) {
+            NSLOG_ERRNO("failed to start process: fork");
             goto cleanup;
         }
         if (state.wine.pid == 0) {
@@ -1144,7 +1138,6 @@ int main(int argc, char **argv) {
         poll_stdin,
         poll_signal,
         poll_errno,
-        poll_wine,
         poll_watchdog,
     };
     struct pollfd poll_[] = {
@@ -1152,7 +1145,6 @@ int main(int argc, char **argv) {
         [poll_stdin]    = { .fd = STDIN_FILENO, .events = POLLIN },
         [poll_signal]   = { .fd = state.sig.sfd, .events = POLLIN },
         [poll_errno]    = { .fd = state.wine.errno_pipe[0], .events = POLLIN },
-        [poll_wine]     = { .fd = state.wine.pfd, .events = POLLIN },
         [poll_watchdog] = { .fd = state.watchdog.tfd, .events = POLLIN },
     };
     while (!state.force_quit && !state.wine.exited) {
@@ -1191,10 +1183,6 @@ int main(int argc, char **argv) {
                 }
             }
         }
-        if (!state.force_quit && poll_[poll_wine].revents & POLLIN) {
-            poll_[poll_wine].fd = -1; // don't poll it anymore
-            state.wine.exited = true;
-        }
         if (!state.force_quit && poll_[poll_watchdog].revents & POLLIN) {
             handle_watchdog_timer_trigger();
         }
@@ -1225,13 +1213,13 @@ cleanup:
     if (state.wine.pid) {
         if (!state.wine.exited) {
             NSLOG_INF("killing wine");
-            if (syscall(SYS_pidfd_send_signal, state.wine.pfd, SIGKILL, NULL, 0) == -1) {
+            if (kill(state.wine.pid, SIGKILL) == -1) {
                 NSLOG_ERRNO("failed to kill wine (pid=%d)", (int)(state.wine.pid));
             }
         }
         if (!state.wine.reaped) {
             siginfo_t siginfo;
-            if (waitid(P_PIDFD, state.wine.pfd, &siginfo, WEXITED) == -1) {
+            if (waitid(P_PID, state.wine.pid, &siginfo, WEXITED) == -1) {
                 NSLOG_WRNNO("failed to reap wine process");
             } else {
                 state.wine.reaped = true;
