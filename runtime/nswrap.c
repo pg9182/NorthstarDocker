@@ -794,14 +794,39 @@ int main(int argc, char **argv) {
     state.cfg.extwine = !strcmp(getenv("NSWRAP_EXTWINE") ?: "", "1"); // whether to use the system wine (from PATH and the WINE* env vars) instead of the built-in one
     state.cfg.nowatchdogquit = !strcmp(getenv("NSWRAP_NOWATCHDOGQUIT") ?: "", "1"); // don't force-quit on watchdog trigger
 
+    /* get runtime dir */
     if (getenv("NSWRAP_RUNTIME")) {
         ssize_t n = snprintf(state.cfg.dir, sizeof(state.cfg.dir), "%s", getenv("NSWRAP_RUNTIME"));
         if (n == -1 || n == sizeof(state.cfg.dir)) {
             NSLOG_ERR("runtime dir (%s) is too long", getenv("NSWRAP_RUNTIME"));
             goto cleanup;
         }
+    } else {
+        ssize_t n = readlink("/proc/self/exe", state.cfg.dir, sizeof(state.cfg.dir)-1);
+        if (n == sizeof(state.cfg.dir)) {
+            n = -1;
+            errno = ENAMETOOLONG;
+        }
+        if (n == -1) {
+            NSLOG_ERRNO("failed to get own executable path");
+            goto cleanup;
+        }
+        state.cfg.dir[n] = '\0';
+        if (*state.cfg.dir != '/') {
+            NSLOG_ERR("own executable path %s is not absolute", state.cfg.dir);
+            goto cleanup;
+        }
+        if (strcmp(&state.cfg.dir[n-sizeof("/bin/nswrap")+1], "/bin/nswrap")) {
+            NSLOG_ERR("own executable path %s does not end in /bin/nswrap (override the runtime base dir with NSWRAP_RUNTIME)", state.cfg.dir);
+            goto cleanup;
+        } else {
+            state.cfg.dir[n-sizeof("/bin/nswrap")+1] = '\0';
+        }
+        setenv("NSWRAP_RUNTIME", state.cfg.dir, 1);
     }
-    if (*state.cfg.dir) {
+
+    /* validate runtime dir */
+    {
         if (*state.cfg.dir != '/') {
             NSLOG_ERR("runtime dir (%s) must be an absolute path", state.cfg.dir);
             goto cleanup;
@@ -870,34 +895,6 @@ int main(int argc, char **argv) {
             }
             #endif
         }
-    } else {
-        ssize_t n = readlink("/proc/self/exe", state.cfg.dir, sizeof(state.cfg.dir)-1);
-        if (n == sizeof(state.cfg.dir)) {
-            n = -1;
-            errno = ENAMETOOLONG;
-        }
-        if (n == -1) {
-            NSLOG_ERRNO("failed to get own executable path");
-            goto cleanup;
-        }
-        state.cfg.dir[n] = '\0';
-        if (*state.cfg.dir != '/') {
-            NSLOG_ERR("own executable path %s is not absolute", state.cfg.dir);
-            goto cleanup;
-        }
-        if (strcmp(&state.cfg.dir[n-sizeof("/bin/nswrap")+1], "/bin/nswrap")) {
-            NSLOG_ERR("own executable path %s does not end in /bin/nswrap (override the runtime base dir with NSWRAP_RUNTIME)", state.cfg.dir);
-            goto cleanup;
-        } else {
-            state.cfg.dir[n-sizeof("/bin/nswrap")+1] = '\0';
-        }
-        setenv("NSWRAP_RUNTIME", state.cfg.dir, 1);
-    }
-
-    if (access("NorthstarLauncher.exe", F_OK)) {
-        char tmp[1024];
-        NSLOG_ERR("NorthstarLauncher.exe does not exist in the current directory (%s)", getcwd(tmp, sizeof(tmp)) ?: "?");
-        goto cleanup;
     }
 
     /* arguments, setproctitle */
@@ -921,6 +918,13 @@ int main(int argc, char **argv) {
         if (state.cfg.setproctitle) {
             setproctitle(argv, NULL);
         }
+    }
+
+    /* valid current dir */
+    if (access("NorthstarLauncher.exe", F_OK)) {
+        char tmp[1024];
+        NSLOG_ERR("NorthstarLauncher.exe does not exist in the current directory (%s)", getcwd(tmp, sizeof(tmp)) ?: "?");
+        goto cleanup;
     }
 
     /* info */
