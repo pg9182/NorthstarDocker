@@ -16,6 +16,7 @@
  *   - glibc (why: works properly with wine and ns)
  *   - northstar 1.12.3+ (why: proper console/stdin/log handling, process title update format, dedicated patches)
  *   - northstar d3d11/gfsdk stubs (why: nulldrv)
+ *   - arm64: box64 9b23c3272bd6e0cffef50e811627301e0b64ea42+
  * - functionality:
  *   - fake stdin/stdout/stderr tty
  *     - prevent log line cutoff by emulating wider screen
@@ -26,6 +27,7 @@
  *   - env var filtering
  *   - process monitoring
  *   - cleanup
+ *   - experimental arm64 support via box64
  *
  * To test this without a patched wine build (it still must be >= wine-9.0), do something like the following:
  * - gcc -Wall -Wextra nswrap.c -o nswrap
@@ -75,6 +77,12 @@
 #include <sys/types.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+
+#ifndef __x86_64__
+#ifndef __aarch64__
+#error unsupported platform
+#endif
+#endif
 
 /** Watchdog timeout (initial). */
 #define NSWRAP_WATCHDOG_TIMEOUT_INITIAL (4*60)
@@ -160,6 +168,10 @@ static int nprocs(void) {
     CPU_ZERO(&cs);
     sched_getaffinity(0, sizeof(cs), &cs);
     return CPU_COUNT(&cs) < c ? CPU_COUNT(&cs) : c;
+}
+
+static bool starts_with(const char *s, const char *p) {
+    return !strncmp(s, p, strlen(p));
 }
 
 #define __NSWRAP_STATUS_RE_REGEXP(_r, _g) _r
@@ -267,7 +279,11 @@ static struct {
     errno = saved_errno; \
 } while (0)
 
+#ifdef __FILE_NAME__
 #define NSLOG_DBG(fmt, ...)   NSLOG(dbg, 90, 90, "[%s:%d %s] " fmt, __FILE_NAME__, __LINE__, __func__, ##__VA_ARGS__)
+#else
+#define NSLOG_DBG(fmt, ...)   NSLOG(dbg, 90, 90, "[%s:%d %s] " fmt, __FILE__, __LINE__, __func__, ##__VA_ARGS__)
+#endif
 #define NSLOG_INF(fmt, ...)   NSLOG(inf, 34,  0, fmt, ##__VA_ARGS__)
 #define NSLOG_WRN(fmt, ...)   NSLOG(wrn, 33, 33, fmt, ##__VA_ARGS__)
 #define NSLOG_WRNNO(fmt, ...) NSLOG(wrn, 33, 33, fmt ": %s", ##__VA_ARGS__, strerror(errno))
@@ -806,6 +822,11 @@ int main(int argc, char **argv) {
                 NSLOG_ERRNO("runtime dir must contain wine executable 'bin/wine64' (%s) unless NSWRAP_EXTWINE is set", tmp);
                 goto cleanup;
             }
+            snprintf(tmp, sizeof(tmp), "%s/bin/wine64-preloader", state.cfg.dir);
+            if (access(tmp, R_OK|X_OK) == -1) {
+                NSLOG_ERRNO("runtime dir must contain wine executable 'bin/wine64-preloader' (%s) unless NSWRAP_EXTWINE is set", tmp);
+                goto cleanup;
+            }
             snprintf(tmp, sizeof(tmp), "%s/bin/wineserver", state.cfg.dir);
             if (access(tmp, R_OK|X_OK) == -1) {
                 NSLOG_ERRNO("runtime dir must contain wine executable 'bin/wineserver' (%s) unless NSWRAP_EXTWINE is set", tmp);
@@ -816,11 +837,38 @@ int main(int argc, char **argv) {
                 NSLOG_ERRNO("runtime dir must contain wine lib dir 'lib64/wine/x86_64-unix' (%s) unless NSWRAP_EXTWINE is set", tmp);
                 goto cleanup;
             }
+            snprintf(tmp, sizeof(tmp), "%s/lib64/wine/x86_64-windows", state.cfg.dir);
+            if (access(tmp, R_OK|X_OK) == -1) {
+                NSLOG_ERRNO("runtime dir must contain wine lib dir 'lib64/wine/x86_64-windows' (%s) unless NSWRAP_EXTWINE is set", tmp);
+                goto cleanup;
+            }
             snprintf(tmp, sizeof(tmp), "%s/prefix", state.cfg.dir);
             if (access(tmp, R_OK|W_OK|X_OK) == -1) {
                 NSLOG_ERRNO("runtime dir must contain writable wineprefix directory 'prefix' (%s) unless NSWRAP_EXTWINE is set", tmp);
                 goto cleanup;
             }
+            #ifdef __aarch64__
+            snprintf(tmp, sizeof(tmp), "%s/bin/box64/box64", state.cfg.dir);
+            if (access(tmp, R_OK|X_OK) == -1) {
+                NSLOG_ERRNO("runtime dir must contain wine executable 'bin/box64/box64' (%s) unless NSWRAP_EXTWINE is set", tmp);
+                goto cleanup;
+            }
+            snprintf(tmp, sizeof(tmp), "%s/bin/box64/wine64", state.cfg.dir);
+            if (access(tmp, R_OK|X_OK) == -1) {
+                NSLOG_ERRNO("runtime dir must contain wine executable 'bin/box64/wine64' (%s) unless NSWRAP_EXTWINE is set", tmp);
+                goto cleanup;
+            }
+            snprintf(tmp, sizeof(tmp), "%s/bin/box64/wine64-preloader", state.cfg.dir);
+            if (access(tmp, R_OK|X_OK) == -1) {
+                NSLOG_ERRNO("runtime dir must contain wine executable 'bin/box64/wine64-preloader' (%s) unless NSWRAP_EXTWINE is set", tmp);
+                goto cleanup;
+            }
+            snprintf(tmp, sizeof(tmp), "%s/bin/box64/wineserver", state.cfg.dir);
+            if (access(tmp, R_OK|X_OK) == -1) {
+                NSLOG_ERRNO("runtime dir must contain wine executable 'bin/box64/wineserver' (%s) unless NSWRAP_EXTWINE is set", tmp);
+                goto cleanup;
+            }
+            #endif
         }
     } else {
         ssize_t n = readlink("/proc/self/exe", state.cfg.dir, sizeof(state.cfg.dir)-1);
@@ -909,6 +957,24 @@ int main(int argc, char **argv) {
             NSLOG_INF("- swap: %ld total, %ld free", sinfo.totalswap*sinfo.mem_unit, sinfo.freeswap*sinfo.mem_unit);
             NSLOG_INF("");
         }
+
+        #ifdef __aarch64__
+        NSLOG_WRN("arm64:");
+        NSLOG_WRN("- arm64 support is experimental");
+        NSLOG_WRN("- many arm64 devices, including Raspberry Pis are too slow, and will cause performance issues");
+        NSLOG_WRN("- testing has been primarily done on Ampere-based arm64 cloud instances");
+        NSLOG_WRN("- memory usage will be higher");
+        NSLOG_WRN("- northstar may hang during startup (if it does, restart it)");
+        NSLOG_WRN("- usage with external wine builds will almost certainly not work");
+        NSLOG_WRN("- your host needs to be glibc-based, just like with the regular version");
+        NSLOG_WRN("- box64 env vars will be passed through and override nswrap's defaults");
+        NSLOG_WRN("- the other wine processes don't exit properly under box64 (in docker, this shouldn't matter; if standalone, you can leave them around or kill them manually)");
+        NSLOG_WRN("- this is unsupported");
+        NSLOG_WRN("- this may change at any time");
+        NSLOG_WRN("- use it at your own risk");
+        NSLOG_WRN("- you have been warned");
+        NSLOG_WRN("");
+        #endif
     }
 
     /* signals */
@@ -997,7 +1063,7 @@ int main(int argc, char **argv) {
             NSLOG_ERRNO("failed to set pty master to nonblock");
             goto cleanup;
         }
-    
+
         int rc;
         #define x(_n, _r, _g) _r
         if ((rc = regcomp(&state.io.title_re, NSWRAP_STATUS_RE_REGEXP, REG_EXTENDED) ? -1 : 0)) {
@@ -1067,23 +1133,64 @@ int main(int argc, char **argv) {
             if (getenve("WINEDLLPATH")) wine_envp[i++] = strdup(getenve("WINEDLLPATH"));
             wine_exe = strdup("wine64");
         } else {
+            #ifdef __aarch64__
+            #define BINEXTRA "/box64"
+            #else
+            #define BINEXTRA ""
+            #endif
             char tmp[sizeof(state.cfg.dir)*2];
-            snprintf(tmp, sizeof(tmp), "PATH=%s/bin", state.cfg.dir);
+            snprintf(tmp, sizeof(tmp), "PATH=%s/bin%s:/usr/bin", state.cfg.dir, BINEXTRA);
             wine_envp[i++] = strdup(tmp);
+            #ifndef __aarch64__
             snprintf(tmp, sizeof(tmp), "LD_LIBRARY_PATH=%s/lib64", state.cfg.dir);
             wine_envp[i++] = strdup(tmp);
+            #endif
             snprintf(tmp, sizeof(tmp), "WINEPREFIX=%s/prefix", state.cfg.dir);
             wine_envp[i++] = strdup(tmp);
-            snprintf(tmp, sizeof(tmp), "WINESERVER=%s/bin/wineserver", state.cfg.dir);
+            snprintf(tmp, sizeof(tmp), "WINESERVER=%s/bin%s/wineserver", state.cfg.dir, BINEXTRA);
             wine_envp[i++] = strdup(tmp);
-            snprintf(tmp, sizeof(tmp), "WINELOADER=%s/bin/wine64", state.cfg.dir);
+            snprintf(tmp, sizeof(tmp), "WINELOADER=%s/bin%s/wine64", state.cfg.dir, BINEXTRA);
             wine_envp[i++] = strdup(tmp);
             snprintf(tmp, sizeof(tmp), "WINEDLLPATH=%s/lib64/wine", state.cfg.dir); // note: wine searches the x86_64-windows, x86_64-unix subdirs too
             wine_envp[i++] = strdup(tmp);
-            snprintf(tmp, sizeof(tmp), "%s/bin/wine64", state.cfg.dir);
+            snprintf(tmp, sizeof(tmp), "%s/bin%s/wine64", state.cfg.dir, BINEXTRA);
             wine_exe = strdup(tmp);
+            #undef BINEXTRA
         }
         if (getenve("WINDELLOVERRIDES")) wine_envp[i++] = strdup(getenve("WINDELLOVERRIDES"));
+        #ifdef __aarch64__
+        {
+            NSLOG_DBG("setting up box64 env vars");
+            {
+                extern char **environ;
+                for (size_t j = 0; environ[j]; j++) {
+                    const char *e = environ[j];
+                    if (starts_with(e, "BOX64_")) {
+                        wine_envp[i++] = strdup(e);
+                        NSLOG_WRN("setting box64 env var at your own risk: %s", e);
+                    }
+                }
+            }
+            if (!getenve("BOX64_PREFER_EMULATED")) wine_envp[i++] = strdup("BOX64_PREFER_EMULATED=1");
+            else NSLOG_WRN("you have chosen to override nswrap's BOX64_PREFER_EMULATED at your own risk... it's enabled by default in nswrap so the included libraries are used");
+            if (!getenve("BOX64_PREFER_WRAPPED")) wine_envp[i++] = strdup("BOX64_PREFER_WRAPPED=0");
+            else NSLOG_WRN("you have chosen to override nswrap's BOX64_PREFER_WRAPPED at your own risk... it's disabled by default in nswrap so the included libraries are used");
+            if (!getenve("BOX64_DYNAREC")) wine_envp[i++] = strdup("BOX64_DYNAREC=1");
+            else NSLOG_WRN("you have chosen to override nswrap's BOX64_DYNAREC at your own risk... it's enabled by default in nswrap since the server is unusable otherwise");
+            if (!getenve("BOX64_DYNAREC_SAFEFLAGS")) wine_envp[i++] = strdup("BOX64_DYNAREC_SAFEFLAGS=1");
+            else NSLOG_WRN("you have chosen to override nswrap's BOX64_DYNAREC_SAFEFLAGS at your own risk... it's set to 1 by default in nswrap to be safe, although BOX64_DYNAREC_SAFEFLAGS=0 probably works fine and is faster");
+            if (!getenve("BOX64_DYNAREC_FORWARD")) wine_envp[i++] = strdup("BOX64_DYNAREC_FORWARD=512");
+            else NSLOG_WRN("you have chosen to override nswrap's BOX64_DYNAREC_FORWARD at your own risk... this may impact performance");
+            if (!getenve("BOX64_DYNAREC_BIGBLOCK")) wine_envp[i++] = strdup("BOX64_DYNAREC_BIGBLOCK=1");
+            else NSLOG_WRN("you have chosen to override nswrap's BOX64_DYNAREC_BIGBLOCK at your own risk... this may impact performance");
+            if (!getenve("BOX64_DYNAREC_X87DOUBLE")) wine_envp[i++] = strdup("BOX64_DYNAREC_X87DOUBLE=0");
+            else NSLOG_WRN("you have chosen to override nswrap's BOX64_DYNAREC_X87DOUBLE at your own risk... this may impact performance");
+            if (!getenve("BOX64_DYNAREC_FASTNAN")) wine_envp[i++] = strdup("BOX64_DYNAREC_FASTNAN=1");
+            else NSLOG_WRN("you have chosen to override nswrap's BOX64_DYNAREC_FASTNAN at your own risk... this may impact performance");
+            if (!getenve("BOX64_DYNAREC_FASTROUND")) wine_envp[i++] = strdup("BOX64_DYNAREC_FASTROUND=1");
+            else NSLOG_WRN("you have chosen to override nswrap's BOX64_DYNAREC_FASTROUND at your own risk... this may impact performance");
+        }
+        #endif
         wine_envp[i++] = NULL;
 
         for (i = 0; wine_argv[i]; i++) {
