@@ -14,7 +14,7 @@
  *     - must have host tzdata/ca_certificates/resolv
  *     - wineserver persistence should be disabled for faster cleanup
  *   - glibc (why: works properly with wine and ns)
- *   - northstar 1.12.3+ (why: proper console/stdin/log handling, process title update format, dedicated patches)
+ *   - northstar v(see compat file) (why: proper console/stdin/log handling, process title update format, dedicated patches)
  *   - northstar d3d11/gfsdk stubs (why: nulldrv)
  *   - arm64: box64 9b23c3272bd6e0cffef50e811627301e0b64ea42+
  * - functionality:

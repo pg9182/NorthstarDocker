@@ -357,6 +357,7 @@ FROM --platform=$TARGETPLATFORM docker.io/debian:bookworm-slim
 COPY --link --from=stage-data / /
 COPY --link --from=build-wine /opt/northstar-runtime /opt/northstar-runtime
 COPY --link --from=stage-arch /opt/northstar-runtime /opt/northstar-runtime
+COPY --link ./compat /opt/northstar-runtime/compat
 WORKDIR /mnt
 ENTRYPOINT ["/opt/northstar-runtime/bin/nswrap"]
 CMD ["-dedicated"]
