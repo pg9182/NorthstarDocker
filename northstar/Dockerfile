@@ -1,10 +1,7 @@
 # syntax=docker/dockerfile:1
 #
-# docker buildx build --pull --platform linux/amd64 --target web --load --tag northstar:web .
-# docker buildx build --pull --platform linux/amd64 --build-arg NS_VERSION=1.21.4 --load --tag northstar:latest --tag northstar:1 --tag northstar:1.21 --tag northstar:1.21.4 .
-
-# the northstar runtime multiarch image to use
-ARG NS_RUNTIME=ghcr.io/pg9182/northstar-runtime:latest
+# docker buildx build --build-context northstar-runtime=docker-image://ghcr.io/pg9182/northstar-runtime:latest --pull --platform linux/amd64 --target web --load --tag northstar:web .
+# docker buildx build --build-context northstar-runtime=docker-image://ghcr.io/pg9182/northstar-runtime:latest --pull --platform linux/amd64 --build-arg NS_VERSION=1.21.4 --load --tag northstar:latest --tag northstar:1 --tag northstar:1.21 --tag northstar:1.21.4 .
 
 # the northstar release to download
 ARG NS_VERSION=latest
@@ -31,7 +28,7 @@ ENV NS_VERSION=${NS_VERSION}
 RUN /opt/northstar/bin/nslaunch download
 
 # web image
-FROM --platform=$TARGETPLATFORM ${NS_RUNTIME} AS web
+FROM --platform=$TARGETPLATFORM northstar-runtime AS web
 COPY --link --from=build-nslaunch /opt/northstar /opt/northstar
 ENV NS_VERSION=${NS_VERSION}
 ENTRYPOINT ["/opt/northstar/bin/nslaunch"]
