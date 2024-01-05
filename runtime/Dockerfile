@@ -1,18 +1,28 @@
 # syntax=docker/dockerfile:1
+#
+# docker buildx build --pull --platform linux/amd64 --load --tag northstar-runtime:amd64 .
+# docker buildx build --pull --platform linux/arm64 --load --tag northstar-runtime:arm64 .
+# docker run --rm  --network host -itv /path/to/northstar/installation:/mnt northstar-runtime:amd64 -dedicated +setplaylist aitdm +launchplaylist aitdm +ns_should_return_to_lobby 0
+# note: you can extract /opt/northstar-runtime from the container and run it on most recent glibc-based distros
 
-FROM debian:bookworm AS base
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates tzdata libc6 libgcc-s1 && apt-get clean
+# get the latest debian bookworm ca-certificates and tzdata
+# - https://sourcegraph.com/github.com/wine-mirror/wine@wine-9.0-rc3/-/blob/dlls/crypt32/unixlib.c?L616 (/etc/ssl/certs)
+# - https://sourcegraph.com/github.com/wine-mirror/wine@wine-9.0-rc3/-/blob/dlls/ntdll/unix/system.c?L2348 (libc licaltime function)
+FROM --platform=linux/amd64 docker.io/debian:bookworm AS build-data
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates tzdata && apt-get clean
 
-FROM base AS build
+# patch the winehq amd64 packages and generate the wineprefix
+FROM --platform=linux/amd64 docker.io/debian:bookworm AS build-wine
 
 # install full winehq package
-RUN dpkg --add-architecture i386
-RUN echo 'deb [trusted=yes] https://dl.winehq.org/wine-builds/debian bookworm main' > /etc/apt/sources.list.d/winehq.list && \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates && apt-get clean
+RUN dpkg --add-architecture i386 && \
+    echo 'deb [trusted=yes] https://dl.winehq.org/wine-builds/debian bookworm main' > /etc/apt/sources.list.d/winehq.list && \
     apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y winehq-devel=9.0~rc3~bookworm-1 && apt-get clean && \
     rm /etc/apt/sources.list.d/winehq.list
 
 # install some tools
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y xxd bsdmainutils gawk binutils-mingw-w64 pax-utils gcc && apt-get clean
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y xxd bsdmainutils gawk binutils-mingw-w64 pax-utils && apt-get clean
 
 # rename wine dir
 RUN mv /opt/wine-devel /opt/northstar-runtime
@@ -283,14 +293,70 @@ RUN for lib in libgnutls libfontconfig libfreetype libunwind ; do \
     if [ ! -f /opt/northstar-runtime/lib64/$lib.so* ] ; then \
     echo "missing lib $lib (why wasn't it copied earlier?)" ; exit 1 ; fi ; done
 
-# compile nswrap
-COPY ./nswrap.c /
-RUN gcc -Wall -Wextra /nswrap.c -o /opt/northstar-runtime/bin/nswrap
+# build box64 for arm64
+# - patch: no lscpu process spawning nonsense (it slows down startup and doesn't even work properly)
+# - patch: no rcfiles (we don't want external options interfering with the ones from nswrap)
+FROM --platform=linux/amd64 docker.io/debian:bookworm AS build-box64-arm64
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates gcc-12-aarch64-linux-gnu cmake git ninja-build python3-minimal && apt-get clean
+WORKDIR /src
+RUN git init && \
+    git remote add origin https://github.com/ptitSeb/box64.git && \
+    git fetch https://github.com/ptitSeb/box64.git 9b23c3272bd6e0cffef50e811627301e0b64ea42 --depth=1 && \
+    git checkout FETCH_HEAD
+RUN sed -i 's/popen("lscpu/NULL; \/\/ popen("lscpu/g' src/tools/my_cpuid.c && \
+    if git diff --exit-code src/tools/my_cpuid.c ; \
+    then echo "nothing changed!?!" ; exit 1 ; fi
+RUN sed -i 's/static void load_rcfiles()/static void load_rcfiles(){} static void load_rcfiles_old()/g' src/main.c && \
+    if git diff --exit-code src/main.c ; \
+    then echo "nothing changed!?!" ; exit 1 ; fi
+RUN cmake -B/build -GNinja -DARM_DYNAREC=1 -DCMAKE_INSTALL_PREFIX=/opt/northstar-runtime -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc-12 /build && \
+    ninja -C/build
+RUN install -Dm755 /build/box64 /opt/northstar-runtime/bin/box64/box64
 
-FROM base
-COPY --from=build /opt/northstar-runtime /opt/northstar-runtime
-# if you're getting weird error messages from wine (e.g., failed to create desktop window), uncomment the next line to see if it's a host dependency (missing or mismatch) issue
-# FROM build
+# build nswrap for amd64
+FROM --platform=linux/amd64 docker.io/debian:bookworm AS build-nswrap-amd64
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y gcc-12 && apt-get clean
+COPY ./nswrap.c /
+RUN mkdir -p /opt/northstar-runtime/bin
+RUN gcc-12 -Wall -Wextra /nswrap.c -o /opt/northstar-runtime/bin/nswrap
+
+# build nswrap for arm64
+FROM --platform=linux/amd64 docker.io/debian:bookworm AS build-nswrap-arm64
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y gcc-12-aarch64-linux-gnu && apt-get clean
+COPY ./nswrap.c /
+COPY ./nswrap-box64-shim.c /
+RUN mkdir -p /opt/northstar-runtime/bin/box64
+RUN aarch64-linux-gnu-gcc-12 -Wall -Wextra /nswrap.c -o /opt/northstar-runtime/bin/nswrap
+RUN aarch64-linux-gnu-gcc-12 -Wall -Wextra /nswrap-box64-shim.c -o /opt/northstar-runtime/bin/box64/wine64 -DSHIM_BINARY=wine64
+RUN aarch64-linux-gnu-gcc-12 -Wall -Wextra /nswrap-box64-shim.c -o /opt/northstar-runtime/bin/box64/wine64-preloader -DSHIM_BINARY=wine64-preloader
+RUN aarch64-linux-gnu-gcc-12 -Wall -Wextra /nswrap-box64-shim.c -o /opt/northstar-runtime/bin/box64/wineserver -DSHIM_BINARY=wineserver
+
+# merge the architecture-specific amd64 files
+FROM scratch AS stage-arch-amd64
+COPY --link --from=build-nswrap-amd64 /opt/northstar-runtime/ /opt/northstar-runtime
+
+# merge the architecture-specific arm64 files
+FROM scratch AS stage-arch-arm64
+COPY --link --from=build-nswrap-arm64 /opt/northstar-runtime/ /opt/northstar-runtime
+COPY --link --from=build-box64-arm64 /opt/northstar-runtime/ /opt/northstar-runtime
+
+# choose the architecture-specific files based on the buildkit multi-arch target
+FROM --platform=linux/amd64 docker.io/debian:bookworm AS stage-arch
+ARG TARGETARCH
+RUN --mount=type=bind,from=stage-arch-amd64,source=/,target=/mnt/amd64 \
+    --mount=type=bind,from=stage-arch-arm64,source=/,target=/mnt/arm64 \
+    cp -r /mnt/${TARGETARCH}/opt/northstar-runtime /opt/northstar-runtime
+
+# merge the data files into a single layer
+FROM scratch AS stage-data
+COPY --link --from=build-data /etc/ssl/certs /etc/ssl/certs
+COPY --link --from=build-data /usr/share/zoneinfo /usr/share/zoneinfo
+
+# create the final image
+FROM --platform=$TARGETPLATFORM docker.io/debian:bookworm-slim
+COPY --link --from=stage-data / /
+COPY --link --from=build-wine /opt/northstar-runtime /opt/northstar-runtime
+COPY --link --from=stage-arch /opt/northstar-runtime /opt/northstar-runtime
 WORKDIR /mnt
 ENTRYPOINT ["/opt/northstar-runtime/bin/nswrap"]
 CMD ["-dedicated"]
