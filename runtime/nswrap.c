@@ -684,7 +684,8 @@ static void handle_io_master_writable(void) {
     }
 }
 
-static void handle_io_stdin_readable(void) {
+/* returns false on eof */
+static bool handle_io_stdin_readable(void) {
     if (state.io.n_stdin == sizeof(state.io.b_stdin)) {
         if (state.io.n_stdin_write && state.io.n_stdin > state.io.n_stdin_write) {
             NSLOG_WRN("stdin buffer overflow; discarding oldest line (%zu bytes)", state.io.n_stdin_write);
@@ -703,7 +704,10 @@ static void handle_io_stdin_readable(void) {
         if (errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) {
             NSLOG_WRNNO("failed to read stdin to buffer");
         }
-        return;
+        return true;
+    }
+    if (n == 0) {
+        return false; // EOF
     }
     state.io.n_stdin += n;
     NSLOG_DBG("read %zd bytes\n", n);
@@ -721,6 +725,7 @@ static void handle_io_stdin_readable(void) {
     if (state.io.n_stdin_write) {
         NSLOG_DBG("queuing pty master write of %zu bytes from stdin", state.io.n_stdin_write);
     }
+    return true;
 }
 
 static void please_quit(void) {
@@ -1311,10 +1316,13 @@ int main(int argc, char **argv) {
             handle_io_master_writable();
         }
         if (!state.force_quit && poll_[poll_stdin].revents & POLLIN) {
-            handle_io_stdin_readable();
+            if (!handle_io_stdin_readable()) {
+                NSLOG_WRN("got EOF on stdin; will not be able to send concommands anymore");
+                poll_[poll_stdin].fd = -1; // don't poll it anymore
+            }
         }
         if (!state.force_quit && poll_[poll_stdin].revents & POLLHUP) {
-            NSLOG_WRN("got POLLHUP/EOF on stdin; will not be able to send concommands anymore");
+            NSLOG_WRN("got POLLHUP on stdin; will not be able to send concommands anymore");
             poll_[poll_stdin].fd = -1; // don't poll it anymore
         }
     }
