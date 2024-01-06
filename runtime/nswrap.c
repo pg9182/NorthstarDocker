@@ -93,8 +93,8 @@
 /** Whether to pass-through the title if stdout is a TTY. */
 #define NSWRAP_IOPROC_TTY_TITLE true
 
-/** Whether to pass-through colors if stdout is a TTY. */
-#define NSWRAP_IOPROC_TTY_COLOR true
+/** Whether to pass-through colors if colors are enabled. */
+#define NSWRAP_IOPROC_COLOR true
 
 /** The chunk size for console i/o (also the maximum length of a parsed title and stdin concommand). */
 #define NSWRAP_IOPROC_OUTPUT_CHUNK_SIZE 2048
@@ -201,6 +201,7 @@ static struct {
 
         /* if our stdout is a tty */
         bool istty; // note: you can easily test how nswrap behaves without a tty by putting 'cat - | ' before and ' | cat -' after the command
+
         /* whether to use setproctitle */
         bool setproctitle;
 
@@ -215,6 +216,9 @@ static struct {
 
         /* dir with runtime files (defaults to the executable path with bin/nswrap removed) */
         char dir[1024];
+
+        /* whether to enable colored logs */
+        bool color;
     } cfg;
 
     struct {
@@ -269,7 +273,7 @@ static struct {
     int saved_errno = errno; \
     if (nslog_##_level >= state.cfg.level) { \
         errno = saved_errno; \
-        if (state.cfg.istty) { \
+        if (state.cfg.color) { \
             printf("\x1b[0m" "\x1b[36m" "[nswrap] " "\x1b[" #_level_color "m" "[" #_level "] " "\x1b[%dm" _fmt "\x1b[0m" "\n", _fmt_color, ##__VA_ARGS__); \
         } else { \
             printf("[nswrap] [" #_level "] " _fmt "\n", ##__VA_ARGS__); \
@@ -552,7 +556,7 @@ slow:
             case '3': // text attr: foreground
             case '4': // text attr: background
             case '9': // text attr: foreground light
-                if (NSWRAP_IOPROC_TTY_COLOR && state.cfg.istty) {
+                if (NSWRAP_IOPROC_COLOR && state.cfg.color) {
                     state.io.b_out[state.io.n_out++] = 0x1B;
                     state.io.b_out[state.io.n_out++] = '[';
                     state.io.b_out[state.io.n_out++] = c;
@@ -632,7 +636,7 @@ slow:
             }
             break;
         case 33: // inside text attributes (i.e., ignore anything until an invalid attr char or an 'm' to terminate it)
-            if (NSWRAP_IOPROC_TTY_COLOR && state.cfg.istty) {
+            if (NSWRAP_IOPROC_COLOR && state.cfg.color) {
                 state.io.b_out[state.io.n_out++] = c;
             }
             if (c == ';')
@@ -798,6 +802,7 @@ int main(int argc, char **argv) {
     state.cfg.setproctitle_extra = getenv("NSWRAP_INSTANCE"); // set an instance name for the process title
     state.cfg.extwine = !strcmp(getenv("NSWRAP_EXTWINE") ?: "", "1"); // whether to use the system wine (from PATH and the WINE* env vars) instead of the built-in one
     state.cfg.nowatchdogquit = !strcmp(getenv("NSWRAP_NOWATCHDOGQUIT") ?: "", "1"); // don't force-quit on watchdog trigger
+    state.cfg.color = !strcmp(getenv("NSWRAP_COLOR") ?: (state.cfg.istty ? "1" : "0"), "1"); // force enable/disable color (defaults to whether stdout is a tty)
 
     /* get runtime dir */
     if (getenv("NSWRAP_RUNTIME")) {
@@ -940,10 +945,10 @@ int main(int argc, char **argv) {
 
         NSLOG_INF("config:");
         NSLOG_INF("- log level %d", state.cfg.level);
-        NSLOG_INF("- stdin %s a tty (%s use color, %s accept console title updates)",
-            state.cfg.istty ? "is" : "is not",
-            (state.cfg.istty && NSWRAP_IOPROC_TTY_COLOR) ? "will" : "will not",
-            (state.cfg.istty && NSWRAP_IOPROC_TTY_TITLE) ? "will" : "will not");
+        NSLOG_INF("- stdout %s a tty", state.cfg.istty ? "is" : "is not");
+        NSLOG_INF("- %s use colored logs%s",
+            state.cfg.color ? "will" : "will not",
+            (state.cfg.istty && NSWRAP_IOPROC_COLOR) ? "" : " (but not from northstar)");
         NSLOG_INF("- %s update process name (instance label: %s)",
             state.cfg.setproctitle ? "will" : "will not", state.cfg.setproctitle_extra ?: "none");
         NSLOG_INF("- using %s wine64", state.cfg.extwine ? "external" : "built-in");
