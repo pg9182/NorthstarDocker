@@ -18,7 +18,7 @@ FROM --platform=linux/amd64 docker.io/debian:bookworm AS build-wine
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates && apt-get clean
 RUN dpkg --add-architecture i386 && \
     echo 'deb [trusted=yes] https://dl.winehq.org/wine-builds/debian bookworm main' > /etc/apt/sources.list.d/winehq.list && \
-    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y winehq-devel=9.0~rc3~bookworm-1 && apt-get clean && \
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y winehq-devel=9.0~rc3~bookworm-1 wine-devel=9.0~rc3~bookworm-1 wine-devel-amd64=9.0~rc3~bookworm-1 wine-devel-i386=9.0~rc3~bookworm-1 && apt-get clean && \
     rm /etc/apt/sources.list.d/winehq.list
 
 # install some tools
