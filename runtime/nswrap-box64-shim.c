@@ -1,5 +1,5 @@
 /**
- * A shim for executing out binaries with box64 without binfmt_misc.
+ * A shim for executing binaries with box64 without binfmt_misc.
  *
  * Box64 imposes a few requirements on us:
  * - box64 itself must be in the PATH
