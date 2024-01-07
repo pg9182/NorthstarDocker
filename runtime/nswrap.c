@@ -17,6 +17,11 @@
  *   - northstar v(see compat file) (why: proper console/stdin/log handling, process title update format, dedicated patches)
  *   - northstar d3d11/gfsdk stubs (why: nulldrv)
  *   - arm64: box64 9b23c3272bd6e0cffef50e811627301e0b64ea42+
+ *     you probably want one of the following platforms to have sufficient performance
+ *     - Ampere A1 (hetzner, oracle, etc) - 1 core per server, 3+ cores minimum (tested, confirmed working)
+ *     - Snapdragon 8cx Gen 3 - 1 core per server, 3+ cores minimum (likely working based on benchmarks)
+ *     - RPi 5B BCM2712@3000MHz - 1 core per server, 3+ cores minimum (maybe working based on benchmarks)
+ *     - Qualcomm QRB5165@2840MHz - 1 core per server, 3+ cores minimum  (maybe working based on benchmarks)
  * - functionality:
  *   - fake stdin/stdout/stderr tty
  *     - prevent log line cutoff by emulating wider screen
