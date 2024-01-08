@@ -125,22 +125,6 @@ RUN rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/xaudio* && \
 # remove wow64
 RUN rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/wow64*
 
-# remove some more interactive stuff
-RUN rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/comdlg32.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/riched20.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/ieframe.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/ieproxy.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/browseui.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/scrrun.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/cryptdlg.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/rasdlg.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/scarddlg.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/hhctrl.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/dhtmled.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/regedit.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/mshta.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/*.cpl
-
 # remove print/scan/telephony/smartcard/media/speech/webcam stuff
 RUN rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/tapi32.* && \
     rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/sane.* && \
@@ -165,16 +149,11 @@ RUN rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/tapi32.* && \
 
 # remove misc stuff
 RUN rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/msi.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/wscript.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/cscript.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/jscript.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/vbscript.* && \
     rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/dwrite.* && \
     rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/gdiplus.* && \
     rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/winhlp32.* && \
     rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/oledb32.* && \
     rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/odbc32.* && \
-    rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/l3codeca.* && \
     rm -v /opt/northstar-runtime/lib64/wine/x86_64-*/wpcap.*
 
 # remove binaries which depend on the stuff we just removed
@@ -222,8 +201,8 @@ RUN gawk -i inplace '{ if (match($0, /^\[(.+)\]$/, m)) { header=1 ; section=m[1]
     (!header && match($0, /(wmplayer|wordpad|iexplore)\.exe/)) { next } \
     (!header && match($0, /winemenubuilder/)) { next } \
     (!header && match($0, /^system\.ini,\s*(mci|drivers32|mail)/)) { next } \
-    (match(section, /^(BITS|EventLog|HTTP|MSI|NDIS|NsiProxy|RpcSs|ScardSvr|Spooler|Winmgmt|Sti|PlugPlay|WPFFontCache|LanmanServer|FontCache|TaskScheduler|wuau|Terminal)(Services?|ServiceKeys)$/)) { next } \
-    (!header && match($0, /^AddService=.+,(BITS|EventLog|HTTP|MSI|NDIS|NsiProxy|RpcSs|ScardSvr|Spooler|Winmgmt|Sti|PlugPlay|WPFFontCache|LanmanServer|FontCache|TaskScheduler|wuau|Terminal)(Services?)$/)) { next } \
+    (match(section, /^(BITS|EventLog|HTTP|MSI|NDIS|NsiProxy|ScardSvr|Spooler|Winmgmt|Sti|PlugPlay|WPFFontCache|LanmanServer|FontCache|TaskScheduler|wuau|Terminal)(Services?|ServiceKeys)$/)) { next } \
+    (!header && match($0, /^AddService=.+,(BITS|EventLog|HTTP|MSI|NDIS|NsiProxy|ScardSvr|Spooler|Winmgmt|Sti|PlugPlay|WPFFontCache|LanmanServer|FontCache|TaskScheduler|wuau|Terminal)(Services?)$/)) { next } \
     1' /opt/northstar-runtime/share/wine/wine.inf
 
 # create a wineprefix and disable automatic prefix updates
