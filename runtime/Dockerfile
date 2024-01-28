@@ -280,7 +280,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certi
 WORKDIR /src
 RUN git init && \
     git remote add origin https://github.com/ptitSeb/box64.git && \
-    git fetch https://github.com/ptitSeb/box64.git 9b23c3272bd6e0cffef50e811627301e0b64ea42 --depth=1 && \
+    git fetch https://github.com/ptitSeb/box64.git 35a32481c61a3d70e44ea58ea0fb0f0fb30f0451 --depth=1 && \
     git checkout FETCH_HEAD
 RUN sed -i 's/popen("lscpu/NULL; \/\/ popen("lscpu/g' src/tools/my_cpuid.c && \
     if git diff --exit-code src/tools/my_cpuid.c ; \
