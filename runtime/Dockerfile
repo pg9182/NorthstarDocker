@@ -302,7 +302,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certi
 WORKDIR /src
 RUN git init && \
     git remote add origin https://github.com/ptitSeb/box64.git && \
-    git fetch https://github.com/ptitSeb/box64.git 08085be36070ba22b9e2e99529826d60d5ba149f --depth=1 && \
+    git fetch https://github.com/ptitSeb/box64.git 62695ceed4982c3fdf379b65cc4481c3656cd6ac --depth=1 && \
     git checkout FETCH_HEAD
 RUN sed -i 's/#ifndef STATICBUILD/#if 0/g' src/tools/my_cpuid.c && \
     if git diff --exit-code src/tools/my_cpuid.c ; \
