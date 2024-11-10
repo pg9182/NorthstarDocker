@@ -1,0 +1,82 @@
+northstar
+
+when downloading, write the release version to a file (and error if the file exists but doesn't match exactly)
+
+determine the compatibility level from the version (choose the latest compatibility level it matches)
+
+TITANFALL - source for titanfall files (the version will be checked to ensure compatibility with the specified northstar version)
+    local:PATH
+    nstf:OCI_IMAGE@TAG
+    none (only valid for building oci layers)
+
+NORTHSTAR - base release version followed by one or more space-separated (applied in order)
+    RELEASEVER (must be the first one, required, used for downloading the release zip and determining compatibility)
+        latest -> vX.Y.Z (default)
+        vX.Y.Z
+        vX.Y -> vX.Y.Z
+        vX -> vX.Y.Z
+        dev (future release -- all three things below are required)
+    navs@
+        local:PATH
+        gh[/USER[/REPO]]:COMMIT
+        gh[/USER[/REPO]]:branch:BRANCH -> gh[/USER[/REPO]]:COMMIT
+        gh[/USER[/REPO]]:tag:TAG -> gh[/USER[/REPO]]:COMMIT
+    mods@
+        local:PATH
+        gh[/USER[/REPO]]:COMMIT
+        gh[/USER[/REPO]]:branch:BRANCH -> gh[/USER[/REPO]]:COMMIT
+        gh[/USER[/REPO]]:tag:TAG -> gh[/USER[/REPO]]:COMMIT
+    launcher@
+        local:PATH
+        gha[/USER[/REPO]]:RUNID
+        gha[/USER[/REPO]]:[pipeline/]BUILDNO -> gha[/USER[/REPO]]:RUNID
+        gh[/USER[/REPO]]:COMMIT -> gha[/USER[/REPO]]:ci.yml/BUILDNO
+        gh[/USER[/REPO]]:branch:BRANCH -> gh[/USER[/REPO]]:COMMIT
+        gh[/USER[/REPO]]:tag:TAG -> gh[/USER[/REPO]]:COMMIT
+    stubs@
+        local:PATH
+        gha[/USER[/REPO]]:RUNID
+        gha[/USER[/REPO]]:[pipeline/]BUILDNO -> gha[/USER[/REPO]]:RUNID
+        gh[/USER[/REPO]]:COMMIT -> gha[/USER[/REPO]]:ci.yml/BUILDNO
+        gh[/USER[/REPO]]:branch:BRANCH -> gh[/USER[/REPO]]:COMMIT
+        gh[/USER[/REPO]]:tag:TAG -> gh[/USER[/REPO]]:COMMIT
+
+NORTHSTAR_MODS - zero or more mods/plugins (plugins will be found by looking for .dlls, mods will be found by looking for the mod json)
+    thunderstore:pkg@ver
+    gha[/USER[/REPO]]:RUNID
+    gha[/USER[/REPO]]:[pipeline/]BUILDNO -> gha[/USER[/REPO]]:RUNID
+    gh[/USER/REPO]:COMMIT
+    gh[/USER[/REPO]]:branch:BRANCH -> gh[/USER[/REPO]]:COMMIT
+    gh[/USER[/REPO]]:tag:TAG -> gh[/USER[/REPO]]:COMMIT
+
+
+the -> shows how non-canonical references are resolved into canonical ones (these are not cached)
+
+if /opt/northstar already exists and is non-empty, the download process is disabled
+the download process resolves each canonical reference into an output path, a hash (sha256: md5: sha1:), and a function to download that file
+after downloading, if caching is enabled, a cache/manifests/WHAT/REFERENCE file is written with the output path and hash of each file from that reference
+while downloading, if caching is enabled, and cache/manifests/WHAT/REFERENCE exists (including all referenced hashes), that is used directly
+while downloading, if caching is enabled, it first looks for cache/data/HASH_TYPE/HASH:0:2/HASH, and if it doesn't exist or is invalid, writes the data to cache/data/HASH_TYPE/HASH:0:2/HASH.tmp.RANDOM (so cache dirs can be used concurrently), then renames it on completion
+the download order is randomized to make multiple downloads running at the same time more likely to use cached data from each other
+
+to build the northstar install dir:
+- titanfall is symlinked
+- northstar is symlinked, and replacement navs/mods/launcher is symlinked over it
+- if any file is writable, it is copied (or reflinked if the fs supports it) rather than symlinked
+- data dirs are symlinked into a subdir of /mnt/data
+- the config is modified as necessary based on the environment (NS_SERVER_NAME, NS_SERVER_DESC, NS_SERVER_PASSWORD, NS_PORT, NS_MASTERSERVER_URL, NS_MASTERSERVER_REGISTER, NS_INSECURE)
+
+nswrap is started with NS_EXTRA_ARGUMENTS
+
+in addition to building a ghcr.io/r2northstar/northstar:web image based on the stuff above (which is built as a layer on ghcr.io/r2northstar/northstar-runtime:latest),
+a separate manually-triggered ci create tagged ghcr.io/r2northstar/northstar images
+    :SUFFIX (is SUFFIX is latest, tag :latest for the greatest one)
+    :vX-SUFFIX (exclude SUFFIX if it is latest)
+    :vX.Y-SUFFIX (exclude SUFFIX if it is latest)
+    :vX.Y.Z-SUFFIX (exclude SUFFIX if it is latest)
+using a config file with rows in the form SUFFIX RELEASEVER EXTRA like:
+    latest  v1.2.3
+    latest  v1.3.0
+    latest  v1.3.1
+    latest  v1.3.2
+    fd      v1.3.2 mods@gh:gamemode-fd
